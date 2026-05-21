@@ -1,0 +1,104 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号 (例如 1.0.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build app
+        run: bash build.sh
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create DMG
+        run: |
+          hdiutil create -volname "ClaudeTrafficLight" \
+            -srcfolder dist/ClaudeTrafficLight.app \
+            -ov -format UDZO \
+            dist/ClaudeTrafficLight-${{ steps.version.outputs.version }}.dmg
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClaudeTrafficLight-${{ steps.version.outputs.version }}
+          path: |
+            dist/ClaudeTrafficLight.app
+            dist/ClaudeTrafficLight-${{ steps.version.outputs.version }}.dmg
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ClaudeTrafficLight-${{ needs.build.outputs.version }}
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Claude Code Traffic Light v${{ needs.build.outputs.version }}
+          body: |
+            ## Claude Code Traffic Light v${{ needs.build.outputs.version }}
+
+            ### 安装说明
+
+            **方式一：直接下载 .app**
+            1. 下载 `ClaudeTrafficLight.app.zip`
+            2. 解压后将 `ClaudeTrafficLight.app` 拖入 Applications 文件夹
+            3. 双击启动
+
+            **方式二：下载 DMG 安装包**
+            1. 下载 `ClaudeTrafficLight-${{ needs.build.outputs.version }}.dmg`
+            2. 双击打开 DMG，将应用拖入 Applications 文件夹
+            3. 启动应用
+
+            ### 功能特性
+
+            - 🟢 绿灯常亮 — 会话进行中
+            - 🟡 黄灯闪烁 — 需要确认
+            - 🔴 红灯常亮 — 会话结束
+            - 多项目支持
+            - 自动配置 Claude Code hooks
+
+            ### 系统要求
+
+            - macOS 10.15+
+          files: |
+            dist/ClaudeTrafficLight.app.zip
+            dist/ClaudeTrafficLight-${{ needs.build.outputs.version }}.dmg
+          draft: false
+          prerelease: false
