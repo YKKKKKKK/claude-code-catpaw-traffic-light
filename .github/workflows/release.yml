@@ -16,6 +16,8 @@ permissions:
 jobs:
   build:
     runs-on: macos-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -49,12 +51,15 @@ jobs:
             -ov -format UDZO \
             dist/ClaudeTrafficLight-${{ steps.version.outputs.version }}.dmg
 
+      - name: Zip app
+        run: cd dist && zip -r ClaudeTrafficLight.app.zip ClaudeTrafficLight.app
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ClaudeTrafficLight-${{ steps.version.outputs.version }}
           path: |
-            dist/ClaudeTrafficLight.app
+            dist/ClaudeTrafficLight.app.zip
             dist/ClaudeTrafficLight-${{ steps.version.outputs.version }}.dmg
 
   release:
@@ -98,7 +103,7 @@ jobs:
 
             - macOS 10.15+
           files: |
-            dist/ClaudeTrafficLight.app.zip
-            dist/ClaudeTrafficLight-${{ needs.build.outputs.version }}.dmg
+            ClaudeTrafficLight.app.zip
+            ClaudeTrafficLight-${{ needs.build.outputs.version }}.dmg
           draft: false
           prerelease: false

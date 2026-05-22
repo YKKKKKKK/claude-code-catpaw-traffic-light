@@ -164,9 +164,12 @@ def configure_hooks():
     desired = {
         "SessionStart":       [_make_hook_entry(_hook_cmd("red"))],
         "UserPromptSubmit":   [_make_hook_entry(_hook_cmd("green"))],
+        "Notification":       [_make_hook_entry(_hook_cmd("yellow"))],
+        "PermissionRequest":  [_make_hook_entry(_hook_cmd("yellow"))],
         "PreToolUse":         [_make_hook_entry(_hook_cmd("yellow"), matcher=permission_tools)],
         "PostToolUse":        [_make_hook_entry(_hook_cmd("green"), matcher=permission_tools)],
         "Stop":               [_make_hook_entry(_hook_cmd("red"))],
+        "SessionEnd":         [_make_hook_entry(_hook_cmd("red"))],
     }
 
     for hook_name, new_entries in desired.items():
