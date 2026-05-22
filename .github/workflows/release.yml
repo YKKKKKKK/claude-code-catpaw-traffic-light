@@ -102,6 +102,20 @@ jobs:
             ### 系统要求
 
             - macOS 10.15+
+
+            ### ⚠️ macOS 安全提示（"无法验证开发者"）
+
+            首次打开时，macOS 可能会弹出 **"无法验证开发者"** 或 **"Apple 无法检查是否包含恶意软件"** 的提示，这是正常的——因为此应用未经 Apple 公证（Notarization）。
+
+            **解决方法：**
+
+            1. 在「系统设置 → 隐私与安全性」底部，点击 **"仍要打开"**
+            2. 或者右键点击应用 → 选择 **"打开"**，再次弹窗时点击 **"打开"**
+            3. 如果以上都不行，打开终端执行：
+               ```bash
+               xattr -cr /Applications/ClaudeTrafficLight.app
+               ```
+               然后正常双击打开即可。
           files: |
             ClaudeTrafficLight.app.zip
             ClaudeTrafficLight-${{ needs.build.outputs.version }}.dmg
