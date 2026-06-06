@@ -1,6 +1,6 @@
 # Claude Code & CatPaw Traffic Light
 
-macOS 菜单栏状态监控工具 —— 通过红绿灯直观显示 Claude Code 和 CatPaw（IDEA 插件）的 Agent 工作状态。
+macOS 菜单栏状态监控工具 —— 通过红绿灯直观显示 Claude Code 和 CatPaw 的 Agent 工作状态。
 
 ![macOS](https://img.shields.io/badge/macOS-supported-blue)
 ![Python](https://img.shields.io/badge/Python-3.9+-green)
@@ -12,8 +12,9 @@ macOS 菜单栏状态监控工具 —— 通过红绿灯直观显示 Claude Code
   - 🟢 绿灯常亮 — 空闲 / 完成 / 成功
   - 🟡 黄灯闪烁 — Agent 正在执行 / 思考 / 调用工具或命令
   - 🔴 红灯常亮 — 失败 / 拒绝 / 取消 / 异常
-- **双源监控**：同时监控 Claude Code（命令行）和 CatPaw（IDEA 插件），任一 Agent 工作即亮黄灯
+- **双源监控**：同时监控 Claude Code（命令行）和 CatPaw（JetBrains 插件），任一 Agent 工作即亮黄灯
 - **监控模式切换**：支持仅监控 Claude Code、仅监控 CatPaw、或两者同时监控
+- **多 IDE 支持**：CatPaw 监控自动覆盖 IntelliJ IDEA、PyCharm、WebStorm 等所有已安装的 JetBrains IDE
 - **多项目支持**：同时监控多个项目的 Claude Code 状态，一键切换
 - **自动配置**：启动时自动配置 Claude Code hooks，退出时自动还原
 - **配置备份**：安全备份原始 `settings.json`，确保不影响现有配置
@@ -51,9 +52,29 @@ python build.py
 
 ### 方式三：直接运行 Python 脚本
 
+适合开发调试阶段，无需构建 `.app`，修改代码后立即生效。
+
 ```bash
+# 克隆项目
+git clone https://github.com/DemoJj/claude-code-traffic-light.git
+cd claude-code-traffic-light
+
+# 创建虚拟环境并安装依赖
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# 运行
 python traffic_light.py
 ```
+
+或直接使用 venv 内的 Python（无需 activate）：
+
+```bash
+venv/bin/python traffic_light.py
+```
+
+> **注意**：系统自带的 Python 3.9 可能因编译环境缺失而无法安装 `rumps` 依赖，推荐使用上述 venv 方式。
 
 启动后，菜单栏会出现红绿灯图标，自动开始监控状态。
 
@@ -84,18 +105,16 @@ python traffic_light.py
 
 ### CatPaw 监控
 
-通过轮询 CatPaw 本地 SQLite 数据库（`~/.sankuai/MCopilot/sqliteDB/globalCache.sqlite`）判断状态，无需任何额外配置。
+通过后台线程实时监听 CatPaw 写入的 IDEA 日志文件（`~/Library/Logs/JetBrains/*/idea.log`）中的 `AgentTabService` 状态行，无需任何额外配置。自动扫描并监听 `~/Library/Logs/JetBrains/` 目录下**所有** JetBrains IDE 的日志，同时支持 IntelliJ IDEA、PyCharm、WebStorm 等。
 
 #### 状态判断逻辑
 
-扫描最近对话的消息记录，比较 `user_prompt` 和 `text` 消息的先后顺序：
-
-| 数据库消息状态 | 显示状态 |
-|------|------|
-| 最新消息为 `user_prompt`（AI 尚未回复） | 🟡 黄灯 |
-| 最新消息为 `text`（AI 已完成回复） | 🟢 绿灯 |
-| 出现 `cancel` 或 `error` | 🔴 红灯 |
-| 超过 30 秒无新消息 | 🟢 绿灯（空闲） |
+| 日志事件 | 显示状态 | 说明 |
+|------|------|------|
+| `Status: running` | 🟡 黄灯 | Agent 正在执行工具或思考 |
+| `Status: completed` | 🟡 黄灯（短暂）→ 🟢 绿灯 | 等待 2 秒确认无新任务后变绿，避免多工具连续执行时误判为完成 |
+| `Status: cancelled` / `failed` | 🔴 红灯 | 进入 10 秒保护期，屏蔽 CatPaw 取消后自动发出的 `running` 事件 |
+| 超过 60 秒无任何事件 | 🟢 绿灯 | 超时兜底，防止黄灯卡死 |
 
 ### 双源合并规则
 
@@ -109,7 +128,7 @@ python traffic_light.py
 |------|------|
 | 🔀 两者都监控 | 同时监控 Claude Code 和 CatPaw（默认） |
 | 🤖 仅 Claude Code | 只监控命令行 Claude Code |
-| 🐾 仅 CatPaw | 只监控 IDEA 插件 CatPaw |
+| 🐾 仅 CatPaw | 只监控 JetBrains IDE 插件 CatPaw（支持 IDEA / PyCharm / WebStorm 等） |
 
 ## 配置说明
 

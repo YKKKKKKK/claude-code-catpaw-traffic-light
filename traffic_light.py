@@ -36,8 +36,6 @@ LIGHT_ON = {"red": "🔴", "yellow": "🟡", "green": "🟢"}
 LIGHT_OFF = "⚫"
 
 # ---------- CatPaw 配置 ----------
-# IDEA 日志路径（实时写入，用于监听 CatPaw Agent 状态变化）
-IDEA_LOG_PATH = os.path.expanduser("~/Library/Logs/JetBrains/IntelliJIdea2024.1/idea.log")
 # CatPaw 空闲超时（秒）：超过此时间无 running/completed 事件 → 视为空闲
 CATPAW_IDLE_TIMEOUT = 60
 
@@ -87,27 +85,17 @@ CATPAW_GREEN_DELAY = 2.0           # completed 后等待此秒数，确认没有
 CATPAW_CANCEL_PROTECT = 10.0       # cancelled 后保护期（秒），期间 running 不覆盖红灯
 
 
-def _find_idea_log():
-    """自动查找 IDEA 日志文件，支持不同版本的 IntelliJ"""
-    # 先用配置的路径
-    if Path(IDEA_LOG_PATH).exists():
-        return IDEA_LOG_PATH
-    # 自动搜索其他版本
+def _find_idea_logs():
+    """查找所有 JetBrains IDE 的日志文件（支持 IntelliJ / PyCharm / WebStorm 等）"""
     base = Path("~/Library/Logs/JetBrains").expanduser()
-    if base.exists():
-        candidates = sorted(base.glob("*/idea.log"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if candidates:
-            return str(candidates[0])
-    return None
+    if not base.exists():
+        return []
+    return list(base.glob("*/idea.log"))
 
 
-def _catpaw_log_watcher():
-    """后台线程：持续监听 idea.log 中的 AgentTabService 状态行"""
+def _catpaw_log_watcher_single(log_path):
+    """监听单个 idea.log 文件的后台线程"""
     global _catpaw_state_cache, _catpaw_last_event_time, _catpaw_pending_green_at, _catpaw_cancelled_at
-
-    log_path = _find_idea_log()
-    if not log_path:
-        return
 
     try:
         with open(log_path, "r", encoding="utf-8", errors="replace") as f:
@@ -148,8 +136,26 @@ def _catpaw_log_watcher():
     except Exception:
         pass
 
-    # 线程退出后标记为 None，下次调用时重启
+
+def _catpaw_log_watcher():
+    """后台主线程：为每个 JetBrains IDE 的日志文件启动独立监听子线程"""
     global _catpaw_log_thread
+
+    log_paths = _find_idea_logs()
+    if not log_paths:
+        _catpaw_log_thread = None
+        return
+
+    threads = []
+    for log_path in log_paths:
+        t = threading.Thread(target=_catpaw_log_watcher_single, args=(str(log_path),), daemon=True)
+        t.start()
+        threads.append(t)
+
+    # 等待所有子线程退出（通常不会退出，除非日志轮转后重启）
+    for t in threads:
+        t.join()
+
     _catpaw_log_thread = None
 
 
@@ -431,7 +437,7 @@ class TrafficLightApp(rumps.App):
             self.menu.add(rumps.MenuItem(f"  Claude 项目: {self.selected_project}"))
             self.menu.add(rumps.MenuItem(f"  Claude 模型: {self.claude_info['model']}"))
         if self.monitor_mode in (MONITOR_MODE_CATPAW, MONITOR_MODE_BOTH):
-            catpaw_available = "✅ 已连接" if _find_idea_log() else "❌ 未检测到 IDEA 日志"
+            catpaw_available = "✅ 已连接" if _find_idea_logs() else "❌ 未检测到 IDEA 日志"
             self.menu.add(rumps.MenuItem(f"  CatPaw: {catpaw_available}"))
 
         # 状态说明
