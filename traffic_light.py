@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
 """
 Claude Code / CatPaw 顶部栏红绿灯 —— Python 版
-三个灯同时显示，根据状态变化：
-- 绿灯常亮：空闲 / 完成 / 成功
-- 黄灯闪烁：Agent 正在执行 / 思考 / 调用工具
-- 红灯常亮：失败 / 拒绝 / 取消 / 异常
+
+菜单栏同时显示三盏灯，根据 Agent 状态实时切换：
+  ⚫ ⚫ 🟢  绿灯常亮  —— 空闲 / 完成 / 成功（默认状态）
+  ⚫ 🟡 ⚫  黄灯闪烁  —— Agent 正在执行 / 思考 / 调用工具
+  🔴 ⚫ ⚫  红灯常亮  —— 失败 / 取消 / 异常
+
+支持两种 Agent 来源：
+  1. Claude Code（CLI）：通过 ~/.claude/settings.json 注入 hooks，
+     每次工具调用前后将状态写入 ~/.claude/traffic_light/<项目名>.state 文件。
+  2. CatPaw（JetBrains 插件）：实时 tail ~/Library/Logs/JetBrains/*/idea.log，
+     解析 AgentTabService 日志行获取 running / completed / cancelled 状态。
+
+程序退出时会自动清理注入到 Claude Code 的 hooks，恢复原始配置。
 """
 import json
 import sys, os
@@ -37,7 +46,7 @@ LIGHT_OFF = "⚫"
 
 # ---------- CatPaw 配置 ----------
 # CatPaw 空闲超时（秒）：超过此时间无 running/completed 事件 → 视为空闲
-CATPAW_IDLE_TIMEOUT = 60
+CATPAW_IDLE_TIMEOUT = 60       # 黄灯超时保护（秒）：超过此时间没有任何新事件，强制变绿（防止卡死）
 
 # 监控模式
 MONITOR_MODE_CLAUDE = "claude"    # 仅监控 Claude Code
@@ -242,7 +251,7 @@ def list_active_projects():
 
 
 def backup_config():
-    """备份原始配置文件"""
+    """备份 ~/.claude/settings.json 原始内容（启动时调用，退出时由 restore_config 还原）"""
     if Path(CONFIG_PATH).exists():
         try:
             shutil.copy2(CONFIG_PATH, BACKUP_PATH)
@@ -254,7 +263,12 @@ def backup_config():
 
 
 def restore_config():
-    """还原备份的配置文件并清理所有新增文件"""
+    """
+    程序退出时的清理函数（通过 atexit / signal handler 注册）。
+    职责：
+      1. 将 ~/.claude/settings.json 还原为启动前的备份版本（移除注入的 hooks）
+      2. 删除 ~/.claude/traffic_light/ 状态目录
+    """
     # 还原配置
     if Path(BACKUP_PATH).exists():
         try:
@@ -305,7 +319,20 @@ def _make_hook_entry(command, matcher=""):
 
 # ---------- 自动配置 Hook ----------
 def configure_hooks():
-    """安全地将所需的 hook 合并到 ~/.claude/settings.json"""
+    """
+    将红绿灯所需的 hooks 合并写入 ~/.claude/settings.json。
+
+    Hook 触发链（Claude Code 执行流程）：
+      SessionStart       → 绿灯（会话刚建立，等待用户输入）
+      UserPromptSubmit   → 黄灯（用户提交问题，Agent 开始思考）
+      PreToolUse         → 黄灯（工具调用前，Agent 正在执行）
+      PostToolUse        → 黄灯（工具调用后，Agent 继续处理结果）
+      PermissionRequest  → 黄灯（等待用户授权工具执行）
+      Stop               → 绿灯（Agent 正常完成本轮回答）
+      SessionEnd         → 绿灯（会话彻底结束）
+
+    注意：每次调用都会先清除旧的红绿灯 hooks，再写入新的，避免重复累积。
+    """
     Path(CONFIG_PATH).parent.mkdir(parents=True, exist_ok=True)
     Path(STATE_DIR).mkdir(parents=True, exist_ok=True)
 
@@ -551,6 +578,7 @@ def main():
     atexit.register(restore_config)
 
     def signal_handler(sig, frame):
+        # 捕获 Ctrl+C (SIGINT) 和系统终止 (SIGTERM)，确保退出时清理 hooks
         restore_config()
         sys.exit(0)
 
