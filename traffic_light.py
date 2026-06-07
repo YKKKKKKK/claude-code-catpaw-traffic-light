@@ -131,10 +131,11 @@ LAUNCH_AGENT_PLIST    = os.path.expanduser(
 STATS_FILE            = os.path.join(BASE_DIR, "daily_stats.json")  # 今日统计
 
 # ---- 挂件尺寸预设（窗口宽度固定，高度自适应内容） ----
+WIDGET_SH = 0   # 不留阴影边距，彻底无阴影
 WIDGET_SIZES = {
-    "small":  {"w": 72,  "h": 260, "dot": 16, "card_w": 68,  "pad_v": 10, "gap": 4},
-    "medium": {"w": 100, "h": 290, "dot": 22, "card_w": 88,  "pad_v": 14, "gap": 5},
-    "large":  {"w": 130, "h": 350, "dot": 30, "card_w": 116, "pad_v": 18, "gap": 7},
+    "small":  {"w": 72,  "h": 260, "dot": 16, "card_w": 72,  "pad_v": 10, "gap": 4},
+    "medium": {"w": 96,  "h": 290, "dot": 22, "card_w": 96,  "pad_v": 14, "gap": 5},
+    "large":  {"w": 124, "h": 350, "dot": 30, "card_w": 124, "pad_v": 18, "gap": 7},
 }
 
 
@@ -582,9 +583,9 @@ def _build_widget_html(size_key="medium"):
     card_w   = s["card_w"]
     pad_v    = s["pad_v"]
     gap      = s["gap"]
+    sh       = WIDGET_SH   # body padding = 阴影扩散边距
     title_sz = max(7, dot_sz // 3)
     label_sz = max(8, dot_sz // 2 - 2)
-    close_sz = max(12, dot_sz // 2)
     gloss_w  = max(6, dot_sz // 2 - 2)
     gloss_h  = max(4, dot_sz // 3)
     return f"""<!DOCTYPE html>
@@ -609,10 +610,7 @@ def _build_widget_html(size_key="medium"):
     -webkit-backdrop-filter: blur(36px) saturate(160%);
     border-radius: 20px;
     border: 0.5px solid rgba(255, 255, 255, 0.13);
-    box-shadow:
-      0 4px 28px rgba(0, 0, 0, 0.35),
-      0 1px 4px rgba(0, 0, 0, 0.2),
-      inset 0 0.5px 0 rgba(255, 255, 255, 0.12);
+    box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.12);
     padding: {pad_v}px 0 {max(pad_v-2,8)}px;
     display: flex; flex-direction: column; align-items: center;
     position: relative;
@@ -728,25 +726,12 @@ def _build_widget_html(size_key="medium"):
     -webkit-app-region: drag;
     display: none;
   }}
-  /* ── 关闭按钮 ── */
-  .close-btn {{
-    position: absolute; top: 8px; right: 8px;
-    width: {close_sz}px; height: {close_sz}px; border-radius: 50%;
-    background: rgba(255,255,255,0.07); border: none; cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
-    opacity: 0; transition: opacity 0.18s, background 0.18s;
-    -webkit-app-region: no-drag; font-size: 9px;
-    color: rgba(255,255,255,0.45); line-height: 1;
-  }}
-  .card:hover .close-btn {{ opacity: 1; }}
-  .close-btn:hover {{ background: rgba(255,59,48,.55); color: rgba(255,255,255,.9); }}
   /* ── 折叠状态下标题颜色微调 ── */
   .title.collapsed-state {{ color: rgba(255,255,255,0.3); }}
 </style>
 </head>
 <body>
 <div class="card">
-  <button class="close-btn" onclick="window.webkit.messageHandlers.pawClose.postMessage('')">✕</button>
   <div class="title" id="title-bar" onclick="toggleCollapse()">PawSignal</div>
 
   <!-- 可折叠区域 -->
@@ -868,15 +853,6 @@ def _build_widget_html(size_key="medium"):
 </script>
 </body>
 </html>"""
-
-
-# ---------- WKScriptMessageHandler：JS → Python ----------
-_WKScriptMessageHandler = objc.protocolNamed("WKScriptMessageHandler")
-
-class PawCloseHandler(objc.lookUpClass("NSObject"), protocols=[_WKScriptMessageHandler]):
-    """接收挂件内关闭按钮点击"""
-    def userContentController_didReceiveScriptMessage_(self, controller, message):
-        _app_delegate_ref[0]._hide_widget()
 
 
 # ---------- 全局 delegate 引用（供回调访问） ----------
@@ -1275,15 +1251,12 @@ class AppDelegate(NSObject):
         win.setBackgroundColor_(NSColor.clearColor())
         win.setOpaque_(False)
         win.setHasShadow_(False)
+        win.invalidateShadow()
         win.setMovableByWindowBackground_(True)
         win.setCollectionBehavior_((1 << 2) | (1 << 3))
         win.setReleasedWhenClosed_(False)
 
-        ucc = WKUserContentController.alloc().init()
-        handler = PawCloseHandler.alloc().init()
-        ucc.addScriptMessageHandler_name_(handler, "pawClose")
         cfg = WKWebViewConfiguration.alloc().init()
-        cfg.setUserContentController_(ucc)
 
         wk = DraggableWKWebView.alloc().initWithFrame_configuration_(
             NSMakeRect(0, 0, w, h), cfg
@@ -1291,9 +1264,11 @@ class AppDelegate(NSObject):
         wk.setOpaque_(False)
         wk.setValue_forKey_(False, "drawsBackground")
         html = _build_widget_html(self._widget_size)
+        # 使用本地 file:// baseURL，确保 messageHandlers 不被安全策略拦截
+        tmp_base = NSURL.fileURLWithPath_(os.path.expanduser("~"))
         wk.loadHTMLString_baseURL_(
             NSString.stringWithString_(html),
-            NSURL.URLWithString_("about:blank")
+            tmp_base
         )
 
         win.setContentView_(wk)
