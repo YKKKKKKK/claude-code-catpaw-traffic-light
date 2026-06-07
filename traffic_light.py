@@ -15,11 +15,15 @@ Claude Code / CatPaw 顶部栏红绿灯 —— 纯原生 PyObjC 版（无 rumps�
      监听 Hook 事件：beforeSubmitPrompt / afterAgentResponse / beforeShellExecution / stop
 
 新功能：
-  - 挂件位置记忆：拖动后自动保存，重启恢复
+  - 挂件位置记忆：拖动后自动保存，重启恢复（含越界保护）
   - 挂件尺寸可调：小/中/大三档，菜单切换
   - 多会话同时显示：Claude Code 各项目 + CatPaw 各自分行
   - 开机自启动：菜单项写入/移除 LaunchAgents
-  - 今日统计：记录执行次数和总时长，菜单显示摘要
+  - 今日统计：记录执行次数和总时长，不满1分钟显示秒数
+  - 黄灯实时计时：挂件底部实时显示当前执行已用时长
+  - 屏幕变化自动归位：插拔显示器/切换 Space 后挂件自动归位至可见区域
+  - 挂件点击折叠：单击卡片标题可折叠/展开挂件主体
+  - 菜单栏实时秒数：黄灯执行时菜单顶部显示已执行秒数
 """
 import json
 import sys
@@ -43,7 +47,7 @@ from AppKit import (
     NSBackingStoreBuffered, NSMakeRect, NSScreen,
     NSApplicationActivationPolicyAccessory,
     NSObject, NSRunLoop, NSDate,
-    NSTimer,
+    NSTimer, NSNotificationCenter,
 )
 from WebKit import WKWebView, WKWebViewConfiguration, WKUserContentController
 from Foundation import NSURL, NSString
@@ -201,6 +205,25 @@ def _load_widget_position():
         pass
     return None
 
+def _clamp_position_to_screen(x, y, w, h):
+    """确保挂件至少有一部分在屏幕可见区域内，防止位置越界"""
+    try:
+        screens = NSScreen.screens()
+        if not screens:
+            return x, y
+        # 找到所有屏幕的联合可视区域
+        min_x = min(s.visibleFrame().origin.x for s in screens)
+        min_y = min(s.visibleFrame().origin.y for s in screens)
+        max_x = max(s.visibleFrame().origin.x + s.visibleFrame().size.width  for s in screens)
+        max_y = max(s.visibleFrame().origin.y + s.visibleFrame().size.height for s in screens)
+        # 保证挂件至少有 30px 在屏幕内（而不是完全飞出去）
+        margin = 30
+        new_x = max(min_x - w + margin, min(x, max_x - margin))
+        new_y = max(min_y - h + margin, min(y, max_y - margin))
+        return new_x, new_y
+    except Exception:
+        return x, y
+
 # ---- 挂件尺寸 ----
 def get_widget_size():
     try:
@@ -239,6 +262,14 @@ def _save_stats(data):
         Path(STATS_FILE).write_text(json.dumps(data))
     except Exception:
         pass
+
+def _format_duration(secs):
+    """将秒数格式化为可读字符串：不满60秒显示秒，否则显示分钟"""
+    if secs < 60:
+        return f"{secs} 秒"
+    else:
+        mins = secs // 60
+        return f"{mins} 分钟"
 
 # ---- LaunchAgent 自启动 ----
 def _get_launch_agent_plist_content():
@@ -593,6 +624,20 @@ def _build_widget_html(size_key="medium"):
     font-size: {title_sz}px; font-weight: 600; letter-spacing: 0.1em;
     color: rgba(255,255,255,0.45); text-transform: uppercase;
     margin-bottom: {max(8,gap*2)}px; -webkit-app-region: drag;
+    cursor: pointer;
+  }}
+  /* ── 折叠动画 ── */
+  .collapsible {{
+    overflow: hidden;
+    transition: max-height 0.3s ease, opacity 0.3s ease;
+    max-height: 600px;
+    opacity: 1;
+    width: 100%;
+    display: flex; flex-direction: column; align-items: center;
+  }}
+  .collapsible.collapsed {{
+    max-height: 0;
+    opacity: 0;
   }}
   /* ── 固定三灯区 ── */
   .lights {{
@@ -640,6 +685,16 @@ def _build_widget_html(size_key="medium"):
   .light-unit.active-red    .dot-label {{ color: rgba(255,90,75,.9);   font-weight: 500; }}
   .light-unit.active-yellow .dot-label {{ color: rgba(255,210,10,.9);  font-weight: 500; }}
   .light-unit.active-green  .dot-label {{ color: rgba(48,209,88,.88);  font-weight: 500; }}
+  /* ── 黄灯实时计时 ── */
+  .elapsed-bar {{
+    margin-top: {gap}px;
+    font-size: {max(7,label_sz-1)}px; color: rgba(255,210,10,0.75);
+    text-align: center; padding: 0 8px;
+    padding-top: {gap}px;
+    -webkit-app-region: drag;
+    display: none;
+    border-top: 0.5px solid rgba(255,255,255,0.06);
+  }}
   /* ── 多会话来源标签区（固定三灯下方，仅多来源时显示） ── */
   .sessions-bar {{
     width: 100%; padding: 0 8px;
@@ -685,38 +740,66 @@ def _build_widget_html(size_key="medium"):
   }}
   .card:hover .close-btn {{ opacity: 1; }}
   .close-btn:hover {{ background: rgba(255,59,48,.55); color: rgba(255,255,255,.9); }}
+  /* ── 折叠状态下标题颜色微调 ── */
+  .title.collapsed-state {{ color: rgba(255,255,255,0.3); }}
 </style>
 </head>
 <body>
 <div class="card">
   <button class="close-btn" onclick="window.webkit.messageHandlers.pawClose.postMessage('')">✕</button>
-  <div class="title">PawSignal</div>
+  <div class="title" id="title-bar" onclick="toggleCollapse()">PawSignal</div>
 
-  <!-- 始终显示的固定三灯 -->
-  <div class="lights">
-    <div class="light-unit" id="unit-red">
-      <div class="dot off" id="dot-red"></div>
-      <span class="dot-label">失败/取消</span>
+  <!-- 可折叠区域 -->
+  <div class="collapsible" id="collapsible-body">
+    <!-- 始终显示的固定三灯 -->
+    <div class="lights">
+      <div class="light-unit" id="unit-red">
+        <div class="dot off" id="dot-red"></div>
+        <span class="dot-label">失败/取消</span>
+      </div>
+      <div class="light-unit" id="unit-yellow">
+        <div class="dot off" id="dot-yellow"></div>
+        <span class="dot-label">执行中</span>
+      </div>
+      <div class="light-unit active-green" id="unit-green">
+        <div class="dot green" id="dot-green"></div>
+        <span class="dot-label">空闲</span>
+      </div>
     </div>
-    <div class="light-unit" id="unit-yellow">
-      <div class="dot off" id="dot-yellow"></div>
-      <span class="dot-label">执行中</span>
-    </div>
-    <div class="light-unit active-green" id="unit-green">
-      <div class="dot green" id="dot-green"></div>
-      <span class="dot-label">空闲</span>
-    </div>
+
+    <!-- 黄灯执行实时计时 -->
+    <div class="elapsed-bar" id="elapsed-bar">⏱ 执行中 0 秒</div>
+
+    <!-- 多来源时在下方逐行显示各来源状态 -->
+    <div class="sessions-bar" id="sessions-bar"></div>
+
+    <!-- 今日统计 -->
+    <div class="stats-bar" id="stats-bar"></div>
   </div>
-
-  <!-- 多来源时在下方逐行显示各来源状态 -->
-  <div class="sessions-bar" id="sessions-bar"></div>
-
-  <!-- 今日统计 -->
-  <div class="stats-bar" id="stats-bar"></div>
 </div>
 <script>
-  // 更新固定三灯（传入聚合后的最终状态）
-  function updateState(state) {{
+  var _collapsed = false;
+  var _currentState = 'green';
+  var _yellowStartTs = 0;      // 黄灯开始时间戳（由 Python 传入，毫秒）
+  var _elapsedTimer = null;
+
+  // ── 折叠/展开 ──
+  function toggleCollapse() {{
+    _collapsed = !_collapsed;
+    var body  = document.getElementById('collapsible-body');
+    var title = document.getElementById('title-bar');
+    if (_collapsed) {{
+      body.classList.add('collapsed');
+      title.classList.add('collapsed-state');
+    }} else {{
+      body.classList.remove('collapsed');
+      title.classList.remove('collapsed-state');
+    }}
+  }}
+
+  // ── 固定三灯 ──
+  function updateState(state, yellowStartMs) {{
+    _currentState = state;
     var dots  = {{ red: document.getElementById('dot-red'), yellow: document.getElementById('dot-yellow'), green: document.getElementById('dot-green') }};
     var units = {{ red: document.getElementById('unit-red'), yellow: document.getElementById('unit-yellow'), green: document.getElementById('unit-green') }};
     Object.values(dots).forEach(function(d)  {{ d.className = 'dot off'; }});
@@ -724,9 +807,38 @@ def _build_widget_html(size_key="medium"):
     if (state === 'red')         {{ dots.red.className = 'dot red';       units.red.className    = 'light-unit active-red'; }}
     else if (state === 'yellow') {{ dots.yellow.className = 'dot yellow'; units.yellow.className = 'light-unit active-yellow'; }}
     else                         {{ dots.green.className = 'dot green';   units.green.className  = 'light-unit active-green'; }}
+
+    // 黄灯实时计时
+    var elapsedBar = document.getElementById('elapsed-bar');
+    if (state === 'yellow') {{
+      _yellowStartTs = yellowStartMs || Date.now();
+      elapsedBar.style.display = 'block';
+      _startElapsedTimer();
+    }} else {{
+      elapsedBar.style.display = 'none';
+      _yellowStartTs = 0;
+      if (_elapsedTimer) {{ clearInterval(_elapsedTimer); _elapsedTimer = null; }}
+    }}
   }}
 
-  // 多来源列表（仅超过1个时显示小点行）
+  function _startElapsedTimer() {{
+    if (_elapsedTimer) clearInterval(_elapsedTimer);
+    _elapsedTimer = setInterval(function() {{
+      if (_currentState !== 'yellow') {{
+        clearInterval(_elapsedTimer); _elapsedTimer = null; return;
+      }}
+      var secs = Math.floor((Date.now() - _yellowStartTs) / 1000);
+      var text;
+      if (secs < 60) {{
+        text = '⏱ 执行中 ' + secs + ' 秒';
+      }} else {{
+        text = '⏱ 执行中 ' + Math.floor(secs / 60) + ' 分 ' + (secs % 60) + ' 秒';
+      }}
+      document.getElementById('elapsed-bar').textContent = text;
+    }}, 1000);
+  }}
+
+  // ── 多来源列表 ──
   function updateSessions(sessions) {{
     var bar = document.getElementById('sessions-bar');
     if (!sessions || sessions.length <= 1) {{
@@ -783,7 +895,7 @@ class AppDelegate(NSObject):
 
         # 内部状态
         self._state          = "green"
-        self._prev_state     = "green"   # 用于检测状态变化触发通知
+        self._prev_state     = "green"
         self._blink_on       = True
         self._monitor_mode   = get_monitor_mode()
         self._widget_enabled = get_widget_enabled()
@@ -819,6 +931,14 @@ class AppDelegate(NSObject):
         self._blink_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             BLINK_INTERVAL, self, "onBlinkTimer:", None, True
         )
+
+        # 监听屏幕参数变化（插拔显示器 / Space 切换）
+        NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self,
+            "onScreenChanged:",
+            "NSApplicationDidChangeScreenParametersNotification",
+            None,
+        )
         _log("AppDelegate 初始化完成")
 
     # ── 定时器回调 ──────────────────────────────────────────
@@ -848,22 +968,39 @@ class AppDelegate(NSObject):
                 self._stats["runs"] += 1
                 _save_stats(self._stats)
 
+            # 刷新菜单（状态变化时立即更新菜单栏统计行）
+            self._build_menu()
+
         if self._widget_enabled and self._wkview:
             self._push_state_to_widget()
 
-        # 定期刷新菜单
+        # 定期刷新菜单（包含实时秒数）
         now = time.time()
         if now - self._last_menu_build_time > MENU_REFRESH_INTERVAL:
             projects = list_active_projects()
             if projects and self._selected_project not in projects:
                 self._selected_project = projects[0]
                 set_selected_project(self._selected_project)
-            if projects != self._last_projects:
+            if projects != self._last_projects or self._state == "yellow":
+                # 黄灯时每次刷新都重建菜单（更新实时秒数）
                 self._build_menu()
 
     def onBlinkTimer_(self, timer):
         self._blink_on = not self._blink_on
         self._update_status_title()
+
+    def onScreenChanged_(self, notification):
+        """屏幕参数变化时（插拔显示器 / Space 切换），将挂件归位至可见区域"""
+        if self._widget_window and self._widget_enabled:
+            origin = self._widget_window.frame().origin
+            size   = self._widget_window.frame().size
+            nx, ny = _clamp_position_to_screen(
+                origin.x, origin.y, size.width, size.height
+            )
+            if abs(nx - origin.x) > 1 or abs(ny - origin.y) > 1:
+                _log(f"屏幕变化，挂件归位: ({origin.x:.0f},{origin.y:.0f}) → ({nx:.0f},{ny:.0f})")
+                self._widget_window.setFrameOrigin_((nx, ny))
+                _save_widget_position(nx, ny)
 
     # ── 状态计算 ───────────────────────────────────────────
 
@@ -930,15 +1067,19 @@ class AppDelegate(NSObject):
         menu = NSMenu.alloc().init()
         menu.setAutoenablesItems_(False)
 
-        # 今日统计摘要（只读）
+        # 今日统计摘要（只读）—— 黄灯时额外显示已执行秒数
         stats = _load_stats()
-        runs = stats.get("runs", 0)
-        secs = stats.get("total_seconds", 0)
-        mins = secs // 60
+        runs  = stats.get("runs", 0)
+        secs  = stats.get("total_seconds", 0)
+        dur_text = _format_duration(secs) if secs > 0 else "0 秒"
         if runs > 0:
-            stats_label = f"📈 今日：执行 {runs} 次，共 {mins} 分钟"
+            stats_label = f"📈 今日：执行 {runs} 次，共 {dur_text}"
         else:
             stats_label = "📈 今日：暂无执行记录"
+        # 黄灯时追加实时已用时
+        if self._state == "yellow" and self._yellow_start > 0:
+            cur_secs = int(time.time() - self._yellow_start)
+            stats_label += f"  ·  本次 {_format_duration(cur_secs)}"
         mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(stats_label, None, "")
         mi.setEnabled_(False)
         menu.addItem_(mi)
@@ -1105,10 +1246,10 @@ class AppDelegate(NSObject):
         s = WIDGET_SIZES.get(self._widget_size, WIDGET_SIZES["medium"])
         w, h = s["w"], s["h"]
 
-        # 决定初始位置：优先恢复保存的位置
+        # 决定初始位置：优先恢复保存的位置，并做越界保护
         pos = restore_pos or _load_widget_position()
         if pos:
-            x, y = pos
+            x, y = _clamp_position_to_screen(pos[0], pos[1], w, h)
         else:
             screen = NSScreen.mainScreen()
             if screen:
@@ -1176,14 +1317,16 @@ class AppDelegate(NSObject):
         combined = self._get_combined_state()
         sessions = self._get_session_states()
         arr = json.dumps(sessions, ensure_ascii=False)
-        js = f"updateState('{combined}'); updateSessions({arr})"
+        # 传入黄灯开始的 JS 时间戳（毫秒），让 JS 端自行计时
+        yellow_start_ms = int(self._yellow_start * 1000) if self._yellow_start > 0 else 0
+        js = f"updateState('{combined}', {yellow_start_ms}); updateSessions({arr})"
         # 今日统计 bar
         stats = _load_stats()
         runs = stats.get("runs", 0)
         secs = stats.get("total_seconds", 0)
-        mins = secs // 60
+        dur_text = _format_duration(secs) if secs > 0 else ""
         if secs > 0:
-            stats_text = f"今日 {runs} 次  {mins} 分钟"
+            stats_text = f"今日 {runs} 次  {dur_text}"
         else:
             stats_text = f"今日 {runs} 次"
         js += f"; showStats({json.dumps(stats_text)})"
