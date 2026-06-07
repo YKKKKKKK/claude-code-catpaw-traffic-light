@@ -585,7 +585,6 @@ def _build_widget_html(size_key="medium"):
     title_sz = max(7, dot_sz // 3)
     label_sz = max(8, dot_sz // 2 - 2)
     close_sz = max(12, dot_sz // 2)
-    # 高光反射椭圆尺寸
     gloss_w  = max(6, dot_sz // 2 - 2)
     gloss_h  = max(4, dot_sz // 3)
     return f"""<!DOCTYPE html>
@@ -626,7 +625,10 @@ def _build_widget_html(size_key="medium"):
     color: rgba(255,255,255,0.45); text-transform: uppercase;
     margin-bottom: {max(8,gap*2)}px; -webkit-app-region: drag;
   }}
-  .lights {{ display: flex; flex-direction: column; align-items: center; width: 100%; }}
+  /* ── 固定三灯区 ── */
+  .lights {{
+    display: flex; flex-direction: column; align-items: center; width: 100%;
+  }}
   .light-unit {{
     display: flex; flex-direction: column; align-items: center;
     gap: {gap}px; padding: {gap+2}px 0; width: 100%; position: relative;
@@ -640,8 +642,8 @@ def _build_widget_html(size_key="medium"):
     transition: all 0.5s cubic-bezier(0.4,0,0.2,1);
     position: relative; flex-shrink: 0;
   }}
-  .dot.off  {{ background: rgba(255,255,255,0.06); box-shadow: inset 0 1px 3px rgba(0,0,0,0.5); }}
-  .dot.red  {{
+  .dot.off   {{ background: rgba(255,255,255,0.06); box-shadow: inset 0 1px 3px rgba(0,0,0,0.5); }}
+  .dot.red   {{
     background: radial-gradient(circle at 38% 32%, #ff6e63, #ff3b30 55%, #c62218);
     box-shadow: 0 0 0 3px rgba(255,59,48,.15), 0 0 14px rgba(255,59,48,.55), 0 0 30px rgba(255,59,48,.2);
   }}
@@ -669,11 +671,40 @@ def _build_widget_html(size_key="medium"):
   .light-unit.active-red    .dot-label {{ color: rgba(255,90,75,.9);   font-weight: 500; }}
   .light-unit.active-yellow .dot-label {{ color: rgba(255,210,10,.9);  font-weight: 500; }}
   .light-unit.active-green  .dot-label {{ color: rgba(48,209,88,.88);  font-weight: 500; }}
-  .source-label {{
-    font-size: {max(6, label_sz-2)}px; color: rgba(255,255,255,0.18);
-    text-align: center; margin-top: -{gap}px; height: 10px;
-    -webkit-app-region: drag;
+  /* ── 多会话来源标签区（固定三灯下方，仅多来源时显示） ── */
+  .sessions-bar {{
+    width: 100%; padding: 0 8px;
+    border-top: 0.5px solid rgba(255,255,255,0.06);
+    margin-top: {gap}px; padding-top: {gap}px;
+    display: none; flex-direction: column; gap: 3px;
   }}
+  .sessions-bar.visible {{ display: flex; }}
+  .session-row {{
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 2px 4px;
+  }}
+  .session-name {{
+    font-size: {max(7,label_sz-1)}px; color: rgba(255,255,255,0.3);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%;
+  }}
+  .session-dot {{
+    width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  }}
+  .session-dot.red    {{ background: #ff3b30; box-shadow: 0 0 4px rgba(255,59,48,.7); }}
+  .session-dot.yellow {{ background: #ffd60a; box-shadow: 0 0 4px rgba(255,214,10,.7); animation: pulse 1.4s ease-in-out infinite; }}
+  .session-dot.green  {{ background: #30d158; box-shadow: 0 0 4px rgba(48,209,88,.6); }}
+  .session-dot.off    {{ background: rgba(255,255,255,0.12); }}
+  /* ── 今日统计 ── */
+  .stats-bar {{
+    margin-top: {gap}px;
+    font-size: {max(7,label_sz-1)}px; color: rgba(255,255,255,0.22);
+    text-align: center; padding: 0 8px;
+    border-top: 0.5px solid rgba(255,255,255,0.06);
+    padding-top: {gap}px;
+    -webkit-app-region: drag;
+    display: none;
+  }}
+  /* ── 关闭按钮 ── */
   .close-btn {{
     position: absolute; top: 8px; right: 8px;
     width: {close_sz}px; height: {close_sz}px; border-radius: 50%;
@@ -685,82 +716,68 @@ def _build_widget_html(size_key="medium"):
   }}
   .card:hover .close-btn {{ opacity: 1; }}
   .close-btn:hover {{ background: rgba(255,59,48,.55); color: rgba(255,255,255,.9); }}
-  .stats-bar {{
-    margin-top: {gap+2}px;
-    font-size: {max(7,label_sz-1)}px; color: rgba(255,255,255,0.22);
-    text-align: center; line-height: 1.5; padding: 0 8px;
-    border-top: 0.5px solid rgba(255,255,255,0.06);
-    padding-top: {gap}px;
-    -webkit-app-region: drag;
-  }}
 </style>
 </head>
 <body>
 <div class="card">
   <button class="close-btn" onclick="window.webkit.messageHandlers.pawClose.postMessage('')">✕</button>
   <div class="title">PawSignal</div>
-  <div class="lights" id="lights-container">
-    <!-- 默认单灯组（初始化后由 JS 动态管理） -->
-    <div class="light-unit active-green" id="unit-0">
-      <div class="dot green" id="dot-0"></div>
-      <span class="dot-label" id="label-0">空闲</span>
-      <span class="source-label" id="src-0"></span>
+
+  <!-- 始终显示的固定三灯 -->
+  <div class="lights">
+    <div class="light-unit" id="unit-red">
+      <div class="dot off" id="dot-red"></div>
+      <span class="dot-label">失败/取消</span>
+    </div>
+    <div class="light-unit" id="unit-yellow">
+      <div class="dot off" id="dot-yellow"></div>
+      <span class="dot-label">执行中</span>
+    </div>
+    <div class="light-unit active-green" id="unit-green">
+      <div class="dot green" id="dot-green"></div>
+      <span class="dot-label">空闲</span>
     </div>
   </div>
-  <div class="stats-bar" id="stats-bar" style="display:none"></div>
+
+  <!-- 多来源时在下方逐行显示各来源状态 -->
+  <div class="sessions-bar" id="sessions-bar"></div>
+
+  <!-- 今日统计 -->
+  <div class="stats-bar" id="stats-bar"></div>
 </div>
 <script>
-  var _sessions = [];
-
-  var STATE_LABELS = {{ red: '失败/取消', yellow: '执行中', green: '空闲' }};
-
-  function ensureUnits(count) {{
-    var container = document.getElementById('lights-container');
-    var existing = container.querySelectorAll('.light-unit').length;
-    for (var i = existing; i < count; i++) {{
-      var div = document.createElement('div');
-      div.className = 'light-unit';
-      div.id = 'unit-' + i;
-      div.innerHTML =
-        '<div class="dot off" id="dot-' + i + '"></div>' +
-        '<span class="dot-label" id="label-' + i + '"></span>' +
-        '<span class="source-label" id="src-' + i + '"></span>';
-      container.appendChild(div);
-    }}
-    // 隐藏多余的 unit
-    var all = container.querySelectorAll('.light-unit');
-    for (var j = 0; j < all.length; j++) {{
-      all[j].style.display = j < count ? '' : 'none';
-    }}
-  }}
-
-  function updateSessions(sessions) {{
-    // sessions: [{{state, label}}, ...]
-    _sessions = sessions;
-    var n = sessions.length || 1;
-    ensureUnits(n);
-    for (var i = 0; i < n; i++) {{
-      var s = sessions[i] || {{state: 'green', label: ''}};
-      var dot  = document.getElementById('dot-' + i);
-      var lbl  = document.getElementById('label-' + i);
-      var src  = document.getElementById('src-' + i);
-      var unit = document.getElementById('unit-' + i);
-      dot.className  = 'dot ' + s.state;
-      lbl.textContent = STATE_LABELS[s.state] || s.state;
-      src.textContent = (n > 1) ? (s.label || '') : '';
-      unit.className  = 'light-unit active-' + s.state;
-    }}
-  }}
-
-  // 兼容旧的单状态调用
+  // 更新固定三灯（传入聚合后的最终状态）
   function updateState(state) {{
-    updateSessions([{{state: state, label: ''}}]);
+    var dots  = {{ red: document.getElementById('dot-red'), yellow: document.getElementById('dot-yellow'), green: document.getElementById('dot-green') }};
+    var units = {{ red: document.getElementById('unit-red'), yellow: document.getElementById('unit-yellow'), green: document.getElementById('unit-green') }};
+    Object.values(dots).forEach(function(d)  {{ d.className = 'dot off'; }});
+    Object.values(units).forEach(function(u) {{ u.className = 'light-unit'; }});
+    if (state === 'red')         {{ dots.red.className = 'dot red';       units.red.className    = 'light-unit active-red'; }}
+    else if (state === 'yellow') {{ dots.yellow.className = 'dot yellow'; units.yellow.className = 'light-unit active-yellow'; }}
+    else                         {{ dots.green.className = 'dot green';   units.green.className  = 'light-unit active-green'; }}
+  }}
+
+  // 多来源列表（仅超过1个时显示小点行）
+  function updateSessions(sessions) {{
+    var bar = document.getElementById('sessions-bar');
+    if (!sessions || sessions.length <= 1) {{
+      bar.className = 'sessions-bar';
+      bar.innerHTML = '';
+      return;
+    }}
+    bar.className = 'sessions-bar visible';
+    bar.innerHTML = sessions.map(function(s) {{
+      return '<div class="session-row">' +
+        '<span class="session-name">' + (s.label || '') + '</span>' +
+        '<span class="session-dot ' + (s.state || 'off') + '"></span>' +
+        '</div>';
+    }}).join('');
   }}
 
   function showStats(text) {{
     var bar = document.getElementById('stats-bar');
     if (text) {{
-      bar.style.display = '';
+      bar.style.display = 'block';
       bar.textContent = text;
     }} else {{
       bar.style.display = 'none';
@@ -1206,10 +1223,11 @@ class AppDelegate(NSObject):
     def _push_state_to_widget(self):
         if not self._wkview:
             return
+        # 1. 更新固定三灯（根据聚合状态）
+        combined = self._get_combined_state()
         sessions = self._get_session_states()
-        # 构造 JS 数组
         arr = json.dumps(sessions, ensure_ascii=False)
-        js = f"updateSessions({arr})"
+        js = f"updateState('{combined}'); updateSessions({arr})"
         # 今日统计 bar
         stats = _load_stats()
         runs = stats.get("runs", 0)
