@@ -94,14 +94,32 @@
 
 ### CatPaw 监控
 
-后台线程实时 tail 日志文件，无需额外配置：
+后台线程实时 tail 日志文件，无需额外配置。分两个版本：
+
+#### CatPaw JetBrains 插件版（IDEA / GoLand / WebStorm 等）
+
+监听 `~/Library/Logs/JetBrains/*/idea.log`，CatPaw 插件会将任务状态写入 IDEA 日志：
 
 | 日志状态 | 灯色 | 说明 |
 |----------|------|------|
 | `Status: running` | 🟡 黄灯 | Agent 执行中 |
-| `Status: completed` | 🟡 → 🟢 | 2 秒后变绿，防止连续工具调用误判 |
-| `Status: cancelled/failed` | 🔴 红灯 | 10 秒保护期，屏蔽取消后的噪音事件 |
+| `Status: completed` | 🟡 → 🟢 | 3 秒后变绿，防止连续工具调用误判 |
+| `Status: cancelled` / `Status: failed` / `Status: error` | 🔴 红灯 | 任务被中断或出错，10 秒保护期后自动变绿 |
 | 60 秒无事件 | 🟢 绿灯 | 超时兜底 |
+
+> ✅ **支持红灯**：用户点击停止、任务失败均可触发红灯。
+
+#### CatPaw 独立 IDE 版（VSCode 内核）
+
+监听 `~/Library/Application Support/CatPaw/logs/*/window*/exthost/output_logging_*/3-Hook Log.log`，通过 Hook 事件判断状态：
+
+| Hook 事件 | 灯色 | 说明 |
+|-----------|------|------|
+| `beforeSubmitPrompt` | 🟡 黄灯 | 用户发送消息，新一轮开始 |
+| `beforeShellExecution` / `beforeReadFile` | 🟡 黄灯 | Agent 调用工具 |
+| `stop` | 🟡 → 🟢 | 3 秒内无新工具调用则变绿 |
+
+> ⚠️ **不支持红灯**：CatPaw 独立 IDE 的 Hook 系统目前未暴露"失败/取消"事件，`stop` 事件在正常结束和用户中断时均相同，无法区分。如需红灯提示，请使用 CatPaw JetBrains 插件版。
 
 ---
 

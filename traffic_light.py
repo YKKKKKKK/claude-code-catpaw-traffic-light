@@ -132,10 +132,11 @@ STATS_FILE            = os.path.join(BASE_DIR, "daily_stats.json")  # 今日统�
 
 # ---- 挂件尺寸预设（窗口宽度固定，高度自适应内容） ----
 WIDGET_SH = 0   # 不留阴影边距，彻底无阴影
+# h 设为足够大的值（内容自适应，不会截断），卡片用 height:auto 撑高
 WIDGET_SIZES = {
-    "small":  {"w": 72,  "h": 260, "dot": 16, "card_w": 72,  "pad_v": 10, "gap": 4},
-    "medium": {"w": 96,  "h": 290, "dot": 22, "card_w": 96,  "pad_v": 14, "gap": 5},
-    "large":  {"w": 124, "h": 350, "dot": 30, "card_w": 124, "pad_v": 18, "gap": 7},
+    "small":  {"w": 72,  "h": 500, "dot": 16, "card_w": 72,  "pad_v": 10, "gap": 4},
+    "medium": {"w": 96,  "h": 500, "dot": 22, "card_w": 96,  "pad_v": 14, "gap": 5},
+    "large":  {"w": 124, "h": 500, "dot": 30, "card_w": 124, "pad_v": 18, "gap": 7},
 }
 
 
@@ -327,7 +328,8 @@ _catpaw_last_event_time = 0.0
 _catpaw_log_thread     = None
 _catpaw_pending_green_at = 0.0
 _catpaw_cancelled_at   = 0.0
-CATPAW_GREEN_DELAY     = 2.0
+_catpaw_stopped        = False   # stop 事件已触发，等 beforeSubmitPrompt 确认后才变绿
+CATPAW_GREEN_DELAY     = 3.0   # stop 后 3 秒内无新工具调用则变绿
 CATPAW_CANCEL_PROTECT  = 10.0
 
 # ---------- CatPaw JetBrains 插件版日志（idea.log）----------
@@ -388,7 +390,7 @@ def _find_catpaw_vscode_logs():
 def _catpaw_vscode_log_watcher_single(log_path):
     """监听 CatPaw VSCode 独立客户端的 Hook Log 事件"""
     global _catpaw_state_cache, _catpaw_last_event_time
-    global _catpaw_pending_green_at, _catpaw_cancelled_at
+    global _catpaw_pending_green_at, _catpaw_cancelled_at, _catpaw_stopped
     try:
         with open(log_path, "r", encoding="utf-8", errors="replace") as f:
             f.seek(0, 2)
@@ -402,21 +404,34 @@ def _catpaw_vscode_log_watcher_single(log_path):
                     except Exception:
                         pass
                     continue
-                if ("beforeSubmitPrompt" in line or "beforeShellExecution" in line or
-                        "beforeReadFile" in line):
+                if "beforeSubmitPrompt" in line:
+                    # 用户发送了新消息 → 标志上一轮已真正结束，立即变黄（新一轮开始）
                     now = time.time()
                     _catpaw_last_event_time = now
+                    _catpaw_stopped = False
+                    if now - _catpaw_cancelled_at >= CATPAW_CANCEL_PROTECT:
+                        # 先快速过绿灯（上一轮已结束），再立即回黄（新一轮开始）
+                        _catpaw_state_cache = "yellow"
+                        _catpaw_pending_green_at = 0.0
+                elif ("beforeShellExecution" in line or "beforeReadFile" in line):
+                    # Agent 工具调用开始 → 黄灯，清除变绿倒计时
+                    now = time.time()
+                    _catpaw_last_event_time = now
+                    _catpaw_stopped = False
                     if now - _catpaw_cancelled_at >= CATPAW_CANCEL_PROTECT:
                         _catpaw_state_cache = "yellow"
                         _catpaw_pending_green_at = 0.0
                 elif "afterAgentResponse" in line:
+                    # Agent 回复完毕，可能还有后续工具调用，不触发变绿，只记录时间
                     now = time.time()
                     _catpaw_last_event_time = now
-                    if now - _catpaw_cancelled_at >= CATPAW_CANCEL_PROTECT:
-                        _catpaw_pending_green_at = now
                 elif "] Hook step requested: stop" in line:
+                    # Agent 本轮停止 → 开始 5 秒倒计时
+                    # 5 秒内如果来了 beforeShellExecution/beforeReadFile 则取消倒计时继续黄灯
+                    # 5 秒内如果来了 beforeSubmitPrompt（用户发新消息）则直接变黄（新一轮）
                     now = time.time()
                     _catpaw_last_event_time = now
+                    _catpaw_stopped = True
                     if now - _catpaw_cancelled_at >= CATPAW_CANCEL_PROTECT:
                         _catpaw_pending_green_at = now
     except Exception:
@@ -549,12 +564,23 @@ def configure_hooks():
                 f'mkdir -p {STATE_DIR} && '
                 f'echo {state} > {STATE_DIR}/"$project".state {marker}')
 
+    def _hook_cmd_yellow_safe():
+        """写 yellow，但如果当前是 permission 状态则跳过（避免覆盖确认提示）"""
+        marker = f"# {TRAFFIC_MARKER}"
+        sf = f'{STATE_DIR}/"$project".state'
+        return (f'project=$(basename "${{CLAUDE_PROJECT_DIR:-$PWD}}") && '
+                f'mkdir -p {STATE_DIR} && '
+                f'cur=$(cat {sf} 2>/dev/null || echo green) && '
+                f'[ "$cur" != "permission" ] && echo yellow > {sf} {marker} || true')
+
     permission_tools = "Bash|Write|Edit|NotebookEdit|WebFetch"
     desired = {
         "SessionStart":      [_make_hook_entry(_hook_cmd("green"))],
         "UserPromptSubmit":  [_make_hook_entry(_hook_cmd("yellow"))],
-        "PermissionRequest": [_make_hook_entry(_hook_cmd("yellow"))],
-        "PreToolUse":        [_make_hook_entry(_hook_cmd("yellow"), matcher=permission_tools)],
+        # PermissionRequest = 需要用户确认执行命令，写入特殊状态 permission
+        "PermissionRequest": [_make_hook_entry(_hook_cmd("permission"))],
+        # PreToolUse/PostToolUse 不覆盖 permission 状态（等用户点确认后才变回 yellow）
+        "PreToolUse":        [_make_hook_entry(_hook_cmd_yellow_safe(), matcher=permission_tools)],
         "PostToolUse":       [_make_hook_entry(_hook_cmd("yellow"), matcher=permission_tools)],
         "Stop":              [_make_hook_entry(_hook_cmd("green"))],
         "SessionEnd":        [_make_hook_entry(_hook_cmd("green"))],
@@ -602,9 +628,13 @@ def _build_widget_html(size_key="medium"):
     -webkit-app-region: drag;
     user-select: none;
     -webkit-user-select: none;
+    /* 让 body 高度由内容决定，不截断卡片 */
+    display: inline-block;
+    vertical-align: top;
   }}
   .card {{
     width: {card_w}px;
+    height: auto;  /* 内容自适应，不固定高度 */
     background: rgba(24, 24, 26, 0.82);
     backdrop-filter: blur(36px) saturate(160%);
     -webkit-backdrop-filter: blur(36px) saturate(160%);
@@ -728,6 +758,36 @@ def _build_widget_html(size_key="medium"):
   }}
   /* ── 折叠状态下标题颜色微调 ── */
   .title.collapsed-state {{ color: rgba(255,255,255,0.3); }}
+  /* ── 抖动动画 ── */
+  @keyframes shake {{
+    0%,100% {{ transform: translateX(0); }}
+    15%     {{ transform: translateX(-6px); }}
+    30%     {{ transform: translateX(6px); }}
+    45%     {{ transform: translateX(-5px); }}
+    60%     {{ transform: translateX(5px); }}
+    75%     {{ transform: translateX(-3px); }}
+    90%     {{ transform: translateX(3px); }}
+  }}
+  .card.shaking {{ animation: shake 0.55s ease; }}
+  /* ── 确认提示条 ── */
+  .alert-bar {{
+    display: none;
+    margin-top: {gap}px;
+    padding: {gap}px 8px;
+    border-top: 0.5px solid rgba(255,200,10,0.25);
+    font-size: {max(7,label_sz-1)}px;
+    color: rgba(255,210,10,0.95);
+    text-align: center;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    -webkit-app-region: drag;
+    animation: alertPulse 1.2s ease-in-out infinite;
+  }}
+  .alert-bar.visible {{ display: block; }}
+  @keyframes alertPulse {{
+    0%,100% {{ opacity: 1; }}
+    50%     {{ opacity: 0.5; }}
+  }}
 </style>
 </head>
 <body>
@@ -758,6 +818,9 @@ def _build_widget_html(size_key="medium"):
     <!-- 多来源时在下方逐行显示各来源状态 -->
     <div class="sessions-bar" id="sessions-bar"></div>
 
+    <!-- 确认提示条 -->
+    <div class="alert-bar" id="alert-bar">⚠️ 请回到 Agent 确认操作</div>
+
     <!-- 今日统计 -->
     <div class="stats-bar" id="stats-bar"></div>
   </div>
@@ -782,8 +845,10 @@ def _build_widget_html(size_key="medium"):
     }}
   }}
 
+  var _prevNeedsConfirm = false;  // 记录上一轮是否处于确认状态
+
   // ── 固定三灯 ──
-  function updateState(state, yellowStartMs) {{
+  function updateState(state, yellowStartMs, needsConfirm) {{
     var prevState = _currentState;
     _currentState = state;
     var dots  = {{ red: document.getElementById('dot-red'), yellow: document.getElementById('dot-yellow'), green: document.getElementById('dot-green') }};
@@ -794,21 +859,32 @@ def _build_widget_html(size_key="medium"):
     else if (state === 'yellow') {{ dots.yellow.className = 'dot yellow'; units.yellow.className = 'light-unit active-yellow'; }}
     else                         {{ dots.green.className = 'dot green';   units.green.className  = 'light-unit active-green'; }}
 
-    // 黄灯实时计时：只在第一次进入黄灯时初始化，避免被反复重置
+    // 黄灯实时计时
     var elapsedBar = document.getElementById('elapsed-bar');
+    var alertBar   = document.getElementById('alert-bar');
+    var card       = document.querySelector('.card');
     if (state === 'yellow') {{
       if (prevState !== 'yellow') {{
-        // 刚切换到黄灯：用 Python 传来的起始时间戳初始化
         _yellowStartTs = (yellowStartMs && yellowStartMs > 0) ? yellowStartMs : Date.now();
         elapsedBar.style.display = 'block';
         _startElapsedTimer();
       }}
-      // 已经是黄灯：什么都不做，让定时器自己跑
+      // ── 只有 needsConfirm 刚变为 true 时，才抖动 + 显示提示条 ──
+      if (needsConfirm && !_prevNeedsConfirm) {{
+        alertBar.classList.add('visible');
+        card.classList.add('shaking');
+        setTimeout(function() {{ card.classList.remove('shaking'); }}, 600);
+      }} else if (!needsConfirm) {{
+        alertBar.classList.remove('visible');
+      }}
     }} else {{
       elapsedBar.style.display = 'none';
+      alertBar.classList.remove('visible');
       _yellowStartTs = 0;
       if (_elapsedTimer) {{ clearInterval(_elapsedTimer); _elapsedTimer = null; }}
     }}
+    _prevNeedsConfirm = !!needsConfirm;
+    setTimeout(_reportHeight, 50);  // 内容变化后汇报高度
   }}
 
   function _startElapsedTimer() {{
@@ -843,16 +919,53 @@ def _build_widget_html(size_key="medium"):
         '<span class="session-dot ' + (s.state || 'off') + '"></span>' +
         '</div>';
     }}).join('');
+    setTimeout(_reportHeight, 50);
   }}
 
   function showStats(text) {{
     var bar = document.getElementById('stats-bar');
     bar.style.display = 'block';
     bar.textContent = text || '今日 0 次';
+    _reportHeight();
   }}
+
+  // ── 向 Python 汇报卡片实际高度 ──
+  function _reportHeight() {{
+    try {{
+      var h = document.querySelector('.card').getBoundingClientRect().height;
+      window.webkit.messageHandlers.pawResize.postMessage(Math.ceil(h));
+    }} catch(e) {{}}
+  }}
+  // 初始化完成后也汇报一次
+  window.addEventListener('load', function() {{ setTimeout(_reportHeight, 100); }});
 </script>
 </body>
 </html>"""
+
+
+# ---------- WKScriptMessageHandler：JS → Python 高度回调 ----------
+_WKScriptMessageHandler = objc.protocolNamed("WKScriptMessageHandler")
+
+class _PawResizeHandler(objc.lookUpClass("NSObject"), protocols=[_WKScriptMessageHandler]):
+    """接收 JS 汇报的卡片高度，动态调整窗口大小"""
+    def userContentController_didReceiveScriptMessage_(self, controller, message):
+        try:
+            card_h = int(message.body())
+            delegate = _app_delegate_ref[0]
+            if delegate and delegate._widget_window:
+                win = delegate._widget_window
+                wk  = delegate._wkview
+                s   = WIDGET_SIZES.get(delegate._widget_size, WIDGET_SIZES["medium"])
+                w   = s["w"]
+                origin = win.frame().origin
+                # macOS 坐标系原点在左下角，调整高度时需要同步移动 y 坐标，保持窗口顶部不动
+                old_h = win.frame().size.height
+                if abs(card_h - old_h) > 2:  # 变化超过 2px 才更新，防止抖动
+                    new_y = origin.y + old_h - card_h
+                    win.setFrame_display_(NSMakeRect(origin.x, new_y, w, card_h), True)
+                    wk.setFrame_(NSMakeRect(0, 0, w, card_h))
+        except Exception:
+            pass
 
 
 # ---------- 全局 delegate 引用（供回调访问） ----------
@@ -986,12 +1099,17 @@ class AppDelegate(NSObject):
     # ── 状态计算 ───────────────────────────────────────────
 
     def _get_combined_state(self):
+        """返回聚合灯色：permission 也归为 yellow 显示"""
         states = []
         if self._monitor_mode in (MONITOR_MODE_CLAUDE, MONITOR_MODE_BOTH):
             sf = get_state_file(self._selected_project)
             try:
                 content = Path(sf).read_text().strip().lower() if Path(sf).exists() else "green"
-                states.append(content if content in ("green","yellow","red") else "green")
+                # permission 显示为黄灯
+                if content == "permission":
+                    states.append("yellow")
+                else:
+                    states.append(content if content in ("green","yellow","red") else "green")
             except Exception:
                 states.append("green")
         if self._monitor_mode in (MONITOR_MODE_CATPAW, MONITOR_MODE_BOTH):
@@ -1000,25 +1118,38 @@ class AppDelegate(NSObject):
         if "yellow" in states: return "yellow"
         return "green"
 
+    def _needs_confirm(self):
+        """检查是否有任何项目处于 permission（等待用户确认）状态"""
+        if self._monitor_mode in (MONITOR_MODE_CLAUDE, MONITOR_MODE_BOTH):
+            for p in list_active_projects():
+                sf = get_state_file(p)
+                try:
+                    if Path(sf).exists() and Path(sf).read_text().strip().lower() == "permission":
+                        return True
+                except Exception:
+                    pass
+        return False
+
     def _get_session_states(self):
         """返回各来源的状态列表，用于多会话显示"""
         sessions = []
         if self._monitor_mode in (MONITOR_MODE_CLAUDE, MONITOR_MODE_BOTH):
+            # 多个项目聚合为一个 Claude 条目，取最高优先级状态（red > yellow > green）
             projects = list_active_projects()
-            if projects:
-                for p in projects:
-                    sf = get_state_file(p)
-                    try:
-                        content = Path(sf).read_text().strip().lower() if Path(sf).exists() else "green"
-                        st = content if content in ("green","yellow","red") else "green"
-                    except Exception:
-                        st = "green"
-                    sessions.append({"state": st, "label": f"Claude:{p[:8]}"})
-            else:
-                sessions.append({"state": "green", "label": "Claude"})
+            agg = "green"
+            for p in projects:
+                sf = get_state_file(p)
+                try:
+                    content = Path(sf).read_text().strip().lower() if Path(sf).exists() else "green"
+                    st = content if content in ("green","yellow","red") else "green"
+                except Exception:
+                    st = "green"
+                if st == "red" or (st == "yellow" and agg != "red"):
+                    agg = st
+            sessions.append({"state": agg, "label": "Claude"})
         if self._monitor_mode in (MONITOR_MODE_CATPAW, MONITOR_MODE_BOTH):
             sessions.append({"state": get_catpaw_state(), "label": "CatPaw"})
-        # 如果只有单来源单项目，不显示 label（保持简洁）
+        # 如果只有单来源，不显示 label（保持简洁）
         if len(sessions) == 1:
             sessions[0]["label"] = ""
         return sessions
@@ -1107,9 +1238,9 @@ class AppDelegate(NSObject):
         mode_menu   = NSMenu.alloc().init()
         mode_menu.setAutoenablesItems_(False)
         mode_items = [
-            (MONITOR_MODE_BOTH,   "🔀 两者都监控（Claude Code + CatPaw）"),
-            (MONITOR_MODE_CLAUDE, "🤖 仅 Claude Code"),
-            (MONITOR_MODE_CATPAW, "🐾 仅 CatPaw（JetBrains 插件 / VSCode 客户端）"),
+(MONITOR_MODE_BOTH,   "🔀 两者都监控（Claude + CatPaw）"),
+        (MONITOR_MODE_CLAUDE, "🤖 仅 Claude"),
+        (MONITOR_MODE_CATPAW, "🐾 仅 CatPaw"),
         ]
         for mode_key, mode_label in mode_items:
             mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(mode_label, "selectMode:", "")
@@ -1123,7 +1254,7 @@ class AppDelegate(NSObject):
 
         # 项目子菜单（仅 Claude 模式显示）
         if self._monitor_mode in (MONITOR_MODE_CLAUDE, MONITOR_MODE_BOTH):
-            proj_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("📁 Claude Code 项目", None, "")
+            proj_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("📁 Claude 项目", None, "")
             proj_menu   = NSMenu.alloc().init()
             proj_menu.setAutoenablesItems_(False)
             projects = list_active_projects()
@@ -1256,7 +1387,11 @@ class AppDelegate(NSObject):
         win.setCollectionBehavior_((1 << 2) | (1 << 3))
         win.setReleasedWhenClosed_(False)
 
+        ucc = WKUserContentController.alloc().init()
+        resize_handler = _PawResizeHandler.alloc().init()
+        ucc.addScriptMessageHandler_name_(resize_handler, "pawResize")
         cfg = WKWebViewConfiguration.alloc().init()
+        cfg.setUserContentController_(ucc)
 
         wk = DraggableWKWebView.alloc().initWithFrame_configuration_(
             NSMakeRect(0, 0, w, h), cfg
@@ -1299,7 +1434,8 @@ class AppDelegate(NSObject):
         arr = json.dumps(sessions, ensure_ascii=False)
         # 传入黄灯开始的 JS 时间戳（毫秒），让 JS 端自行计时
         yellow_start_ms = int(self._yellow_start * 1000) if self._yellow_start > 0 else 0
-        js = f"updateState('{combined}', {yellow_start_ms}); updateSessions({arr})"
+        needs_confirm = "true" if self._needs_confirm() else "false"
+        js = f"updateState('{combined}', {yellow_start_ms}, {needs_confirm}); updateSessions({arr})"
         # 今日统计 bar
         stats = _load_stats()
         runs = stats.get("runs", 0)
