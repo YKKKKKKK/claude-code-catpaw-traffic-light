@@ -432,13 +432,17 @@ WIDGET_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html {
+    background: transparent;
+  }
   body {
     background: transparent;
     overflow: hidden;
     font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
     -webkit-app-region: drag;
     user-select: none;
+    -webkit-user-select: none;
   }
   .card {
     width: 88px;
@@ -454,6 +458,9 @@ WIDGET_HTML = """<!DOCTYPE html>
     padding: 14px 0 12px;
     display: flex; flex-direction: column; align-items: center;
     position: relative;
+    will-change: transform;
+    transform: translateZ(0);
+    -webkit-transform: translateZ(0);
   }
   .title {
     font-size: 8px; font-weight: 600; letter-spacing: 0.1em;
