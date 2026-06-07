@@ -2,6 +2,7 @@
 set -e
 
 echo "=== PawSignal 构建脚本 ==="
+echo ""
 
 # 检查虚拟环境
 if [ ! -d "venv" ]; then
@@ -20,24 +21,36 @@ pip install -r requirements.txt
 echo "清理旧构建..."
 rm -rf build dist *.spec
 
-# 使用 PyInstaller 打包
-echo "打包中..."
+# ── 打包 PawSignal（菜单栏 + 桌面挂件二合一）──────────────
+echo ""
+echo "打包 PawSignal（含菜单栏 + 桌面挂件）..."
 pyinstaller \
     --name "PawSignal" \
     --windowed \
     --noconfirm \
     --clean \
     --icon "traffic_light.icns" \
-    --add-data "traffic_light.py:." \
     traffic_light.py
 
-echo "=== 构建完成 ==="
-echo "应用位置: dist/PawSignal.app"
+echo "构建完成 → dist/PawSignal.app"
 
-# 生成 DMG 文件
+# ── 生成 DMG ────────────────────────────────────────────────
 echo ""
 echo "正在生成 DMG..."
+rm -rf /tmp/PawSignal_DMG_staging
+mkdir /tmp/PawSignal_DMG_staging
+cp -r "dist/PawSignal.app" "/tmp/PawSignal_DMG_staging/"
+
 rm -f PawSignal.dmg
-hdiutil create -volname "PawSignal" -srcfolder dist/PawSignal.app -ov -format UDZO PawSignal.dmg
-echo "=== DMG 生成完成 ==="
-echo "DMG 位置: PawSignal.dmg"
+hdiutil create \
+    -volname "PawSignal" \
+    -srcfolder /tmp/PawSignal_DMG_staging \
+    -ov -format UDZO \
+    PawSignal.dmg
+
+rm -rf /tmp/PawSignal_DMG_staging
+
+echo ""
+echo "=== 全部构建完成 ==="
+echo "应用:       dist/PawSignal.app"
+echo "DMG 安装包: PawSignal.dmg"

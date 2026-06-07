@@ -1,2 +1,4 @@
-rumps
+pyobjc-core
+pyobjc-framework-Cocoa
+pyobjc-framework-WebKit
 pyinstaller
