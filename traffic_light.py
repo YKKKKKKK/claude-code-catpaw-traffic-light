@@ -7,9 +7,12 @@ Claude Code / CatPaw 顶部栏红绿灯 —— 纯原生 PyObjC 版（无 rumps�
   ⚫ 🟡 ⚫  黄灯闪烁  —— Agent 正在执行 / 思考 / 调用工具
   🔴 ⚫ ⚫  红灯常亮  —— 失败 / 取消 / 异常
 
-支持两种 Agent 来源：
+支持三种 Agent 来源：
   1. Claude Code（CLI）：通过 ~/.claude/settings.json 注入 hooks
-  2. CatPaw（JetBrains 插件）：实时 tail idea.log
+  2. CatPaw JetBrains 插件版：实时 tail ~/Library/Logs/JetBrains/*/idea.log
+  3. CatPaw 独立客户端（VSCode 版）：
+     实时 tail ~/Library/Application Support/CatPaw/logs/*/window*/exthost/output_logging_*/1-Catpaw.log
+     监听 Hook 事件：beforeSubmitPrompt / afterAgentResponse / beforeShellExecution / stop
 """
 import json
 import sys
@@ -159,13 +162,16 @@ _catpaw_cancelled_at   = 0.0
 CATPAW_GREEN_DELAY     = 2.0
 CATPAW_CANCEL_PROTECT  = 10.0
 
+# ---------- CatPaw JetBrains 插件版日志（idea.log）----------
+
 def _find_idea_logs():
     base = Path("~/Library/Logs/JetBrains").expanduser()
     if not base.exists():
         return []
     return list(base.glob("*/idea.log"))
 
-def _catpaw_log_watcher_single(log_path):
+def _catpaw_jetbrains_log_watcher_single(log_path):
+    """监听 JetBrains 插件版 CatPaw 的 idea.log"""
     global _catpaw_state_cache, _catpaw_last_event_time
     global _catpaw_pending_green_at, _catpaw_cancelled_at
     try:
@@ -197,26 +203,103 @@ def _catpaw_log_watcher_single(log_path):
     except Exception:
         pass
 
-def _catpaw_log_watcher():
+# ---------- CatPaw 独立客户端（VSCode 版）日志监听 ----------
+# 日志路径：~/Library/Application Support/CatPaw/logs/<时间戳>/window*/exthost/output_logging_*/3-Hook Log.log
+# Hook 事件格式：
+#   beforeSubmitPrompt   → 用户提交，Agent 开始处理（黄灯）
+#   afterAgentResponse   → Agent 响应完成（绿灯）
+#   beforeShellExecution → 工具调用开始（黄灯）
+#   afterShellExecution  → 工具调用结束（继续等 afterAgentResponse 转绿）
+#   stop                 → 手动停止（红灯）
+
+_CATPAW_VSCODE_LOG_BASE = Path("~/Library/Application Support/CatPaw/logs").expanduser()
+
+def _find_catpaw_vscode_logs():
+    """扫描 CatPaw VSCode 版的最新 Hook Log 文件（支持多 window）"""
+    if not _CATPAW_VSCODE_LOG_BASE.exists():
+        return []
+    # 按时间戳目录名倒序取最新的几个会话
+    session_dirs = sorted(_CATPAW_VSCODE_LOG_BASE.glob("*/"), reverse=True)[:3]
+    logs = []
+    for session_dir in session_dirs:
+        # 匹配 output_logging_*/3-Hook Log.log（Hook 事件写在这里）
+        for log_path in session_dir.glob("window*/exthost/output_logging_*/3-Hook Log.log"):
+            logs.append(log_path)
+    return logs
+
+def _catpaw_vscode_log_watcher_single(log_path):
+    """监听 CatPaw VSCode 独立客户端的 1-Catpaw.log Hook 事件"""
+    global _catpaw_state_cache, _catpaw_last_event_time
+    global _catpaw_pending_green_at, _catpaw_cancelled_at
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            f.seek(0, 2)
+            while True:
+                line = f.readline()
+                if not line:
+                    time.sleep(0.1)
+                    try:
+                        if os.stat(log_path).st_ino != os.fstat(f.fileno()).st_ino:
+                            break
+                    except Exception:
+                        pass
+                    continue
+                # 用户提交 / 工具调用开始 → 黄灯
+                if ("beforeSubmitPrompt" in line or "beforeShellExecution" in line or
+                        "beforeReadFile" in line):
+                    now = time.time()
+                    _catpaw_last_event_time = now
+                    if now - _catpaw_cancelled_at >= CATPAW_CANCEL_PROTECT:
+                        _catpaw_state_cache = "yellow"
+                        _catpaw_pending_green_at = 0.0
+                # Agent 响应完成 → 延迟转绿
+                elif "afterAgentResponse" in line:
+                    now = time.time()
+                    _catpaw_last_event_time = now
+                    if now - _catpaw_cancelled_at >= CATPAW_CANCEL_PROTECT:
+                        _catpaw_pending_green_at = now
+                # stop 在 CatPaw 中是正常结束信号（每次 Agent 完成都会触发）
+                # 不作为红灯，而是视为完成，触发延迟转绿
+                elif "] Hook step requested: stop" in line:
+                    now = time.time()
+                    _catpaw_last_event_time = now
+                    if now - _catpaw_cancelled_at >= CATPAW_CANCEL_PROTECT:
+                        _catpaw_pending_green_at = now
+    except Exception:
+        pass
+
+# ---------- 统一日志监听调度 ----------
+# CatPaw VSCode 版每次启动会创建新时间戳目录，需要持续扫描新文件
+_catpaw_watched_paths = set()   # 已启动监听的日志路径集合
+_catpaw_watcher_lock  = threading.Lock()
+
+def _start_watcher_for_path(log_path, watcher_fn):
+    """为单个日志路径启动监听线程（幂等：同路径只启动一次）"""
+    path_str = str(log_path)
+    with _catpaw_watcher_lock:
+        if path_str in _catpaw_watched_paths:
+            return
+        _catpaw_watched_paths.add(path_str)
+    t = threading.Thread(target=watcher_fn, args=(path_str,), daemon=True)
+    t.start()
+    _log(f"CatPaw 日志监听已启动: {path_str}")
+
+def _catpaw_log_scanner():
+    """持续扫描新的 CatPaw 日志文件并启动对应监听线程"""
     global _catpaw_log_thread
-    log_paths = _find_idea_logs()
-    if not log_paths:
-        _catpaw_log_thread = None
-        return
-    threads = []
-    for log_path in log_paths:
-        t = threading.Thread(target=_catpaw_log_watcher_single,
-                             args=(str(log_path),), daemon=True)
-        t.start()
-        threads.append(t)
-    for t in threads:
-        t.join()
-    _catpaw_log_thread = None
+    while True:
+        # JetBrains 插件版
+        for log_path in _find_idea_logs():
+            _start_watcher_for_path(log_path, _catpaw_jetbrains_log_watcher_single)
+        # VSCode 独立客户端版（每次重扫，感知新会话目录和新 output_logging_ 目录）
+        for log_path in _find_catpaw_vscode_logs():
+            _start_watcher_for_path(log_path, _catpaw_vscode_log_watcher_single)
+        time.sleep(5)   # 每 5 秒重扫一次
 
 def _ensure_log_watcher():
     global _catpaw_log_thread
     if _catpaw_log_thread is None or not _catpaw_log_thread.is_alive():
-        _catpaw_log_thread = threading.Thread(target=_catpaw_log_watcher, daemon=True)
+        _catpaw_log_thread = threading.Thread(target=_catpaw_log_scanner, daemon=True)
         _catpaw_log_thread.start()
 
 def get_catpaw_state():
@@ -621,7 +704,7 @@ class AppDelegate(NSObject):
         mode_items = [
             (MONITOR_MODE_BOTH,   "🔀 两者都监控（Claude Code + CatPaw）"),
             (MONITOR_MODE_CLAUDE, "🤖 仅 Claude Code"),
-            (MONITOR_MODE_CATPAW, "🐾 仅 CatPaw"),
+            (MONITOR_MODE_CATPAW, "🐾 仅 CatPaw（JetBrains 插件 / VSCode 客户端）"),
         ]
         for mode_key, mode_label in mode_items:
             mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(mode_label, "selectMode:", "")
