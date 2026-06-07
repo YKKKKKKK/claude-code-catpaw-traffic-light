@@ -36,7 +36,34 @@ from AppKit import (
 )
 from WebKit import WKWebView, WKWebViewConfiguration, WKUserContentController
 from Foundation import NSURL, NSString
+from AppKit import NSEvent
 import objc
+
+
+# ---------- 可拖拽 WKWebView 子类 ----------
+# 原生 WKWebView 会吃掉所有鼠标事件，导致窗口无法被拖动。
+# 这里重写 mouseDown/mouseDragged，把拖拽事件转发给父窗口。
+class DraggableWKWebView(WKWebView):
+
+    def mouseDown_(self, event):
+        # 记录按下时的屏幕坐标 和 窗口左下角原点，后续全用屏幕坐标计算
+        screen_pt = NSEvent.mouseLocation()
+        win_origin = self.window().frame().origin
+        # 鼠标相对于窗口左下角的偏移，保持这个偏移不变即可
+        self._drag_offset_x = screen_pt.x - win_origin.x
+        self._drag_offset_y = screen_pt.y - win_origin.y
+
+    def mouseDragged_(self, event):
+        try:
+            screen_pt = NSEvent.mouseLocation()
+            new_x = screen_pt.x - self._drag_offset_x
+            new_y = screen_pt.y - self._drag_offset_y
+            self.window().setFrameOrigin_((new_x, new_y))
+        except Exception:
+            pass
+
+    def mouseUp_(self, event):
+        pass
 
 # ---------- 文件日志 ----------
 _LOG_PATH = os.path.expanduser("~/Library/Logs/PawSignal.log")
@@ -717,7 +744,7 @@ class AppDelegate(NSObject):
         cfg = WKWebViewConfiguration.alloc().init()
         cfg.setUserContentController_(ucc)
 
-        wk = WKWebView.alloc().initWithFrame_configuration_(
+        wk = DraggableWKWebView.alloc().initWithFrame_configuration_(
             NSMakeRect(0, 0, 100, 230), cfg
         )
         wk.setOpaque_(False)
