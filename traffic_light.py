@@ -13,6 +13,14 @@ Claude Code / CatPaw 顶部栏红绿灯 —— 纯原生 PyObjC 版（无 rumps�
   3. CatPaw 独立客户端（VSCode 版）：
      实时 tail ~/Library/Application Support/CatPaw/logs/*/window*/exthost/output_logging_*/1-Catpaw.log
      监听 Hook 事件：beforeSubmitPrompt / afterAgentResponse / beforeShellExecution / stop
+
+新功能：
+  - 挂件位置记忆：拖动后自动保存，重启恢复
+  - 挂件尺寸可调：小/中/大三档，菜单切换
+  - 状态变化通知：黄→红时弹 macOS 系统通知
+  - 多会话同时显示：Claude Code 各项目 + CatPaw 各自分行
+  - 开机自启动：菜单项写入/移除 LaunchAgents
+  - 今日统计：记录执行次数和总时长，菜单显示摘要
 """
 import json
 import sys
@@ -23,6 +31,7 @@ import shutil
 import atexit
 import signal
 import time
+import datetime
 import threading
 import logging as _logging
 from pathlib import Path
@@ -35,7 +44,7 @@ from AppKit import (
     NSBackingStoreBuffered, NSMakeRect, NSScreen,
     NSApplicationActivationPolicyAccessory,
     NSObject, NSRunLoop, NSDate,
-    NSTimer,
+    NSTimer, NSUserNotification, NSUserNotificationCenter,
 )
 from WebKit import WKWebView, WKWebViewConfiguration, WKUserContentController
 from Foundation import NSURL, NSString
@@ -62,11 +71,18 @@ class DraggableWKWebView(WKWebView):
             new_x = screen_pt.x - self._drag_offset_x
             new_y = screen_pt.y - self._drag_offset_y
             self.window().setFrameOrigin_((new_x, new_y))
+            # 拖动结束时保存位置（每次 drag 都保，频率可接受）
+            _save_widget_position(new_x, new_y)
         except Exception:
             pass
 
     def mouseUp_(self, event):
-        pass
+        # mouseUp 也保存一次，确保最终位置写入
+        try:
+            origin = self.window().frame().origin
+            _save_widget_position(origin.x, origin.y)
+        except Exception:
+            pass
 
 # ---------- 文件日志 ----------
 _LOG_PATH = os.path.expanduser("~/Library/Logs/PawSignal.log")
@@ -102,6 +118,22 @@ MONITOR_MODE_BOTH     = "both"
 MONITOR_MODE_FILE     = os.path.join(BASE_DIR, "monitor_mode")
 WIDGET_ENABLED_FILE   = os.path.join(BASE_DIR, "widget_enabled")
 MENUBAR_HIDDEN_FILE   = os.path.join(BASE_DIR, "menubar_hidden")
+
+# ---- 新增配置文件路径 ----
+WIDGET_POSITION_FILE  = os.path.join(BASE_DIR, "widget_position")   # x,y
+WIDGET_SIZE_FILE      = os.path.join(BASE_DIR, "widget_size")       # small/medium/large
+NOTIFY_ENABLED_FILE   = os.path.join(BASE_DIR, "notify_enabled")
+LAUNCH_AGENT_PLIST    = os.path.expanduser(
+    "~/Library/LaunchAgents/com.pawsignal.traffic-light.plist"
+)
+STATS_FILE            = os.path.join(BASE_DIR, "daily_stats.json")  # 今日统计
+
+# ---- 挂件尺寸预设 ----
+WIDGET_SIZES = {
+    "small":  {"w": 72,  "h": 190, "dot": 16, "card_w": 68,  "pad_v": 10, "gap": 4},
+    "medium": {"w": 100, "h": 230, "dot": 22, "card_w": 88,  "pad_v": 14, "gap": 5},
+    "large":  {"w": 130, "h": 290, "dot": 30, "card_w": 116, "pad_v": 18, "gap": 7},
+}
 
 
 # ---------- 持久化读写 ----------
@@ -151,6 +183,141 @@ def set_menubar_hidden(hidden: bool):
         Path(MENUBAR_HIDDEN_FILE).write_text("1" if hidden else "0")
     except Exception:
         pass
+
+# ---- 挂件位置 ----
+def _save_widget_position(x, y):
+    try:
+        Path(WIDGET_POSITION_FILE).parent.mkdir(parents=True, exist_ok=True)
+        Path(WIDGET_POSITION_FILE).write_text(f"{x},{y}")
+    except Exception:
+        pass
+
+def _load_widget_position():
+    """返回 (x, y) 或 None"""
+    try:
+        if Path(WIDGET_POSITION_FILE).exists():
+            parts = Path(WIDGET_POSITION_FILE).read_text().strip().split(",")
+            if len(parts) == 2:
+                return float(parts[0]), float(parts[1])
+    except Exception:
+        pass
+    return None
+
+# ---- 挂件尺寸 ----
+def get_widget_size():
+    try:
+        if Path(WIDGET_SIZE_FILE).exists():
+            v = Path(WIDGET_SIZE_FILE).read_text().strip()
+            if v in WIDGET_SIZES:
+                return v
+    except Exception:
+        pass
+    return "medium"
+
+def set_widget_size(size: str):
+    try:
+        Path(WIDGET_SIZE_FILE).parent.mkdir(parents=True, exist_ok=True)
+        Path(WIDGET_SIZE_FILE).write_text(size)
+    except Exception:
+        pass
+
+# ---- 通知开关 ----
+def get_notify_enabled():
+    try:
+        if Path(NOTIFY_ENABLED_FILE).exists():
+            return Path(NOTIFY_ENABLED_FILE).read_text().strip() == "1"
+    except Exception:
+        pass
+    return True
+
+def set_notify_enabled(enabled: bool):
+    try:
+        Path(NOTIFY_ENABLED_FILE).parent.mkdir(parents=True, exist_ok=True)
+        Path(NOTIFY_ENABLED_FILE).write_text("1" if enabled else "0")
+    except Exception:
+        pass
+
+# ---- 今日统计 ----
+def _today_str():
+    return datetime.date.today().isoformat()
+
+def _load_stats():
+    try:
+        if Path(STATS_FILE).exists():
+            data = json.loads(Path(STATS_FILE).read_text())
+            if data.get("date") == _today_str():
+                return data
+    except Exception:
+        pass
+    return {"date": _today_str(), "runs": 0, "total_seconds": 0}
+
+def _save_stats(data):
+    try:
+        Path(STATS_FILE).parent.mkdir(parents=True, exist_ok=True)
+        Path(STATS_FILE).write_text(json.dumps(data))
+    except Exception:
+        pass
+
+# ---- LaunchAgent 自启动 ----
+def _get_launch_agent_plist_content():
+    exe = sys.executable
+    script = os.path.abspath(__file__)
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.pawsignal.traffic-light</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{exe}</string>
+        <string>{script}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>{_LOG_PATH}</string>
+    <key>StandardErrorPath</key>
+    <string>{_LOG_PATH}</string>
+</dict>
+</plist>
+"""
+
+def is_launch_agent_enabled():
+    return Path(LAUNCH_AGENT_PLIST).exists()
+
+def enable_launch_agent():
+    try:
+        Path(LAUNCH_AGENT_PLIST).parent.mkdir(parents=True, exist_ok=True)
+        Path(LAUNCH_AGENT_PLIST).write_text(_get_launch_agent_plist_content())
+        os.system(f"launchctl load '{LAUNCH_AGENT_PLIST}' 2>/dev/null")
+        _log(f"LaunchAgent 已启用: {LAUNCH_AGENT_PLIST}")
+    except Exception as e:
+        _log(f"启用 LaunchAgent 失败: {e}")
+
+def disable_launch_agent():
+    try:
+        if Path(LAUNCH_AGENT_PLIST).exists():
+            os.system(f"launchctl unload '{LAUNCH_AGENT_PLIST}' 2>/dev/null")
+            Path(LAUNCH_AGENT_PLIST).unlink()
+        _log("LaunchAgent 已禁用")
+    except Exception as e:
+        _log(f"禁用 LaunchAgent 失败: {e}")
+
+# ---- macOS 通知 ----
+def _send_notification(title: str, subtitle: str, body: str):
+    try:
+        n = NSUserNotification.alloc().init()
+        n.setTitle_(title)
+        if subtitle:
+            n.setSubtitle_(subtitle)
+        n.setInformativeText_(body)
+        NSUserNotificationCenter.defaultUserNotificationCenter().deliverNotification_(n)
+    except Exception as e:
+        _log(f"通知发送失败: {e}")
 
 
 # ---------- CatPaw 状态监听 ----------
@@ -204,31 +371,21 @@ def _catpaw_jetbrains_log_watcher_single(log_path):
         pass
 
 # ---------- CatPaw 独立客户端（VSCode 版）日志监听 ----------
-# 日志路径：~/Library/Application Support/CatPaw/logs/<时间戳>/window*/exthost/output_logging_*/3-Hook Log.log
-# Hook 事件格式：
-#   beforeSubmitPrompt   → 用户提交，Agent 开始处理（黄灯）
-#   afterAgentResponse   → Agent 响应完成（绿灯）
-#   beforeShellExecution → 工具调用开始（黄灯）
-#   afterShellExecution  → 工具调用结束（继续等 afterAgentResponse 转绿）
-#   stop                 → 手动停止（红灯）
-
 _CATPAW_VSCODE_LOG_BASE = Path("~/Library/Application Support/CatPaw/logs").expanduser()
 
 def _find_catpaw_vscode_logs():
     """扫描 CatPaw VSCode 版的最新 Hook Log 文件（支持多 window）"""
     if not _CATPAW_VSCODE_LOG_BASE.exists():
         return []
-    # 按时间戳目录名倒序取最新的几个会话
     session_dirs = sorted(_CATPAW_VSCODE_LOG_BASE.glob("*/"), reverse=True)[:3]
     logs = []
     for session_dir in session_dirs:
-        # 匹配 output_logging_*/3-Hook Log.log（Hook 事件写在这里）
         for log_path in session_dir.glob("window*/exthost/output_logging_*/3-Hook Log.log"):
             logs.append(log_path)
     return logs
 
 def _catpaw_vscode_log_watcher_single(log_path):
-    """监听 CatPaw VSCode 独立客户端的 1-Catpaw.log Hook 事件"""
+    """监听 CatPaw VSCode 独立客户端的 Hook Log 事件"""
     global _catpaw_state_cache, _catpaw_last_event_time
     global _catpaw_pending_green_at, _catpaw_cancelled_at
     try:
@@ -244,7 +401,6 @@ def _catpaw_vscode_log_watcher_single(log_path):
                     except Exception:
                         pass
                     continue
-                # 用户提交 / 工具调用开始 → 黄灯
                 if ("beforeSubmitPrompt" in line or "beforeShellExecution" in line or
                         "beforeReadFile" in line):
                     now = time.time()
@@ -252,14 +408,11 @@ def _catpaw_vscode_log_watcher_single(log_path):
                     if now - _catpaw_cancelled_at >= CATPAW_CANCEL_PROTECT:
                         _catpaw_state_cache = "yellow"
                         _catpaw_pending_green_at = 0.0
-                # Agent 响应完成 → 延迟转绿
                 elif "afterAgentResponse" in line:
                     now = time.time()
                     _catpaw_last_event_time = now
                     if now - _catpaw_cancelled_at >= CATPAW_CANCEL_PROTECT:
                         _catpaw_pending_green_at = now
-                # stop 在 CatPaw 中是正常结束信号（每次 Agent 完成都会触发）
-                # 不作为红灯，而是视为完成，触发延迟转绿
                 elif "] Hook step requested: stop" in line:
                     now = time.time()
                     _catpaw_last_event_time = now
@@ -269,12 +422,10 @@ def _catpaw_vscode_log_watcher_single(log_path):
         pass
 
 # ---------- 统一日志监听调度 ----------
-# CatPaw VSCode 版每次启动会创建新时间戳目录，需要持续扫描新文件
-_catpaw_watched_paths = set()   # 已启动监听的日志路径集合
+_catpaw_watched_paths = set()
 _catpaw_watcher_lock  = threading.Lock()
 
 def _start_watcher_for_path(log_path, watcher_fn):
-    """为单个日志路径启动监听线程（幂等：同路径只启动一次）"""
     path_str = str(log_path)
     with _catpaw_watcher_lock:
         if path_str in _catpaw_watched_paths:
@@ -285,16 +436,12 @@ def _start_watcher_for_path(log_path, watcher_fn):
     _log(f"CatPaw 日志监听已启动: {path_str}")
 
 def _catpaw_log_scanner():
-    """持续扫描新的 CatPaw 日志文件并启动对应监听线程"""
-    global _catpaw_log_thread
     while True:
-        # JetBrains 插件版
         for log_path in _find_idea_logs():
             _start_watcher_for_path(log_path, _catpaw_jetbrains_log_watcher_single)
-        # VSCode 独立客户端版（每次重扫，感知新会话目录和新 output_logging_ 目录）
         for log_path in _find_catpaw_vscode_logs():
             _start_watcher_for_path(log_path, _catpaw_vscode_log_watcher_single)
-        time.sleep(5)   # 每 5 秒重扫一次
+        time.sleep(5)
 
 def _ensure_log_watcher():
     global _catpaw_log_thread
@@ -426,26 +573,38 @@ def configure_hooks():
         _log(f"写入配置失败: {e}")
 
 
-# ---------- 桌面挂件 HTML ----------
-WIDGET_HTML = """<!DOCTYPE html>
+# ---------- 桌面挂件 HTML 生成器 ----------
+def _build_widget_html(size_key="medium"):
+    s = WIDGET_SIZES.get(size_key, WIDGET_SIZES["medium"])
+    w        = s["w"]
+    h        = s["h"]
+    dot_sz   = s["dot"]
+    card_w   = s["card_w"]
+    pad_v    = s["pad_v"]
+    gap      = s["gap"]
+    title_sz = max(7, dot_sz // 3)
+    label_sz = max(8, dot_sz // 2 - 2)
+    close_sz = max(12, dot_sz // 2)
+    # 高光反射椭圆尺寸
+    gloss_w  = max(6, dot_sz // 2 - 2)
+    gloss_h  = max(4, dot_sz // 3)
+    return f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  html {
-    background: transparent;
-  }
-  body {
+  * {{ margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }}
+  html {{ background: transparent; }}
+  body {{
     background: transparent;
     overflow: hidden;
     font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
     -webkit-app-region: drag;
     user-select: none;
     -webkit-user-select: none;
-  }
-  .card {
-    width: 88px;
+  }}
+  .card {{
+    width: {card_w}px;
     background: rgba(24, 24, 26, 0.82);
     backdrop-filter: blur(36px) saturate(160%);
     -webkit-backdrop-filter: blur(36px) saturate(160%);
@@ -455,103 +614,158 @@ WIDGET_HTML = """<!DOCTYPE html>
       0 4px 28px rgba(0, 0, 0, 0.35),
       0 1px 4px rgba(0, 0, 0, 0.2),
       inset 0 0.5px 0 rgba(255, 255, 255, 0.12);
-    padding: 14px 0 12px;
+    padding: {pad_v}px 0 {max(pad_v-2,8)}px;
     display: flex; flex-direction: column; align-items: center;
     position: relative;
     will-change: transform;
     transform: translateZ(0);
     -webkit-transform: translateZ(0);
-  }
-  .title {
-    font-size: 8px; font-weight: 600; letter-spacing: 0.1em;
+  }}
+  .title {{
+    font-size: {title_sz}px; font-weight: 600; letter-spacing: 0.1em;
     color: rgba(255,255,255,0.45); text-transform: uppercase;
-    margin-bottom: 12px; -webkit-app-region: drag;
-  }
-  .lights { display: flex; flex-direction: column; align-items: center; width: 100%; }
-  .light-unit {
+    margin-bottom: {max(8,gap*2)}px; -webkit-app-region: drag;
+  }}
+  .lights {{ display: flex; flex-direction: column; align-items: center; width: 100%; }}
+  .light-unit {{
     display: flex; flex-direction: column; align-items: center;
-    gap: 5px; padding: 7px 0; width: 100%; position: relative;
-  }
-  .light-unit + .light-unit::before {
+    gap: {gap}px; padding: {gap+2}px 0; width: 100%; position: relative;
+  }}
+  .light-unit + .light-unit::before {{
     content: ''; position: absolute; top: 0; left: 18px; right: 18px;
     height: 0.5px; background: rgba(255,255,255,0.06);
-  }
-  .dot {
-    width: 22px; height: 22px; border-radius: 50%;
+  }}
+  .dot {{
+    width: {dot_sz}px; height: {dot_sz}px; border-radius: 50%;
     transition: all 0.5s cubic-bezier(0.4,0,0.2,1);
     position: relative; flex-shrink: 0;
-  }
-  .dot.off  { background: rgba(255,255,255,0.06); box-shadow: inset 0 1px 3px rgba(0,0,0,0.5); }
-  .dot.red  {
+  }}
+  .dot.off  {{ background: rgba(255,255,255,0.06); box-shadow: inset 0 1px 3px rgba(0,0,0,0.5); }}
+  .dot.red  {{
     background: radial-gradient(circle at 38% 32%, #ff6e63, #ff3b30 55%, #c62218);
     box-shadow: 0 0 0 3px rgba(255,59,48,.15), 0 0 14px rgba(255,59,48,.55), 0 0 30px rgba(255,59,48,.2);
-  }
-  .dot.yellow {
+  }}
+  .dot.yellow {{
     background: radial-gradient(circle at 38% 32%, #ffe066, #ffd60a 55%, #c9a000);
     box-shadow: 0 0 0 3px rgba(255,214,10,.15), 0 0 14px rgba(255,214,10,.6), 0 0 30px rgba(255,214,10,.22);
     animation: pulse 1.4s ease-in-out infinite;
-  }
-  .dot.green {
+  }}
+  .dot.green {{
     background: radial-gradient(circle at 38% 32%, #5dff7e, #30d158 55%, #178c38);
     box-shadow: 0 0 0 3px rgba(48,209,88,.15), 0 0 14px rgba(48,209,88,.5), 0 0 30px rgba(48,209,88,.18);
-  }
-  .dot::after {
+  }}
+  .dot::after {{
     content: ''; position: absolute; top: 4px; left: 5px;
-    width: 8px; height: 5px; background: rgba(255,255,255,0.4);
+    width: {gloss_w}px; height: {gloss_h}px; background: rgba(255,255,255,0.4);
     border-radius: 50%; filter: blur(1px); pointer-events: none; transition: opacity 0.5s;
-  }
-  .dot.off::after { opacity: 0; }
-  @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.6;transform:scale(.92)} }
-  .dot-label {
-    font-size: 9px; font-weight: 400; color: rgba(255,255,255,0.2);
+  }}
+  .dot.off::after {{ opacity: 0; }}
+  @keyframes pulse {{ 0%,100%{{opacity:1;transform:scale(1)}} 50%{{opacity:.6;transform:scale(.92)}} }}
+  .dot-label {{
+    font-size: {label_sz}px; font-weight: 400; color: rgba(255,255,255,0.2);
     height: 11px; text-align: center; transition: color 0.4s, font-weight 0.4s;
     -webkit-app-region: drag;
-  }
-  .light-unit.active-red    .dot-label { color: rgba(255,90,75,.9);   font-weight: 500; }
-  .light-unit.active-yellow .dot-label { color: rgba(255,210,10,.9);  font-weight: 500; }
-  .light-unit.active-green  .dot-label { color: rgba(48,209,88,.88);  font-weight: 500; }
-  .close-btn {
+  }}
+  .light-unit.active-red    .dot-label {{ color: rgba(255,90,75,.9);   font-weight: 500; }}
+  .light-unit.active-yellow .dot-label {{ color: rgba(255,210,10,.9);  font-weight: 500; }}
+  .light-unit.active-green  .dot-label {{ color: rgba(48,209,88,.88);  font-weight: 500; }}
+  .source-label {{
+    font-size: {max(6, label_sz-2)}px; color: rgba(255,255,255,0.18);
+    text-align: center; margin-top: -{gap}px; height: 10px;
+    -webkit-app-region: drag;
+  }}
+  .close-btn {{
     position: absolute; top: 8px; right: 8px;
-    width: 14px; height: 14px; border-radius: 50%;
+    width: {close_sz}px; height: {close_sz}px; border-radius: 50%;
     background: rgba(255,255,255,0.07); border: none; cursor: pointer;
     display: flex; align-items: center; justify-content: center;
     opacity: 0; transition: opacity 0.18s, background 0.18s;
     -webkit-app-region: no-drag; font-size: 9px;
     color: rgba(255,255,255,0.45); line-height: 1;
-  }
-  .card:hover .close-btn { opacity: 1; }
-  .close-btn:hover { background: rgba(255,59,48,.55); color: rgba(255,255,255,.9); }
+  }}
+  .card:hover .close-btn {{ opacity: 1; }}
+  .close-btn:hover {{ background: rgba(255,59,48,.55); color: rgba(255,255,255,.9); }}
+  .stats-bar {{
+    margin-top: {gap+2}px;
+    font-size: {max(7,label_sz-1)}px; color: rgba(255,255,255,0.22);
+    text-align: center; line-height: 1.5; padding: 0 8px;
+    border-top: 0.5px solid rgba(255,255,255,0.06);
+    padding-top: {gap}px;
+    -webkit-app-region: drag;
+  }}
 </style>
 </head>
 <body>
 <div class="card">
   <button class="close-btn" onclick="window.webkit.messageHandlers.pawClose.postMessage('')">✕</button>
   <div class="title">PawSignal</div>
-  <div class="lights">
-    <div class="light-unit" id="unit-red">
-      <div class="dot off" id="dot-red"></div>
-      <span class="dot-label">失败/取消</span>
-    </div>
-    <div class="light-unit" id="unit-yellow">
-      <div class="dot off" id="dot-yellow"></div>
-      <span class="dot-label">执行中</span>
-    </div>
-    <div class="light-unit active-green" id="unit-green">
-      <div class="dot green" id="dot-green"></div>
-      <span class="dot-label">空闲</span>
+  <div class="lights" id="lights-container">
+    <!-- 默认单灯组（初始化后由 JS 动态管理） -->
+    <div class="light-unit active-green" id="unit-0">
+      <div class="dot green" id="dot-0"></div>
+      <span class="dot-label" id="label-0">空闲</span>
+      <span class="source-label" id="src-0"></span>
     </div>
   </div>
+  <div class="stats-bar" id="stats-bar" style="display:none"></div>
 </div>
 <script>
-  function updateState(state) {
-    const dots  = { red: document.getElementById('dot-red'), yellow: document.getElementById('dot-yellow'), green: document.getElementById('dot-green') };
-    const units = { red: document.getElementById('unit-red'), yellow: document.getElementById('unit-yellow'), green: document.getElementById('unit-green') };
-    Object.values(dots).forEach(d => d.className = 'dot off');
-    Object.values(units).forEach(u => u.className = 'light-unit');
-    if (state === 'red')         { dots.red.className = 'dot red';       units.red.className = 'light-unit active-red'; }
-    else if (state === 'yellow') { dots.yellow.className = 'dot yellow'; units.yellow.className = 'light-unit active-yellow'; }
-    else                         { dots.green.className = 'dot green';   units.green.className = 'light-unit active-green'; }
-  }
+  var _sessions = [];
+
+  var STATE_LABELS = {{ red: '失败/取消', yellow: '执行中', green: '空闲' }};
+
+  function ensureUnits(count) {{
+    var container = document.getElementById('lights-container');
+    var existing = container.querySelectorAll('.light-unit').length;
+    for (var i = existing; i < count; i++) {{
+      var div = document.createElement('div');
+      div.className = 'light-unit';
+      div.id = 'unit-' + i;
+      div.innerHTML =
+        '<div class="dot off" id="dot-' + i + '"></div>' +
+        '<span class="dot-label" id="label-' + i + '"></span>' +
+        '<span class="source-label" id="src-' + i + '"></span>';
+      container.appendChild(div);
+    }}
+    // 隐藏多余的 unit
+    var all = container.querySelectorAll('.light-unit');
+    for (var j = 0; j < all.length; j++) {{
+      all[j].style.display = j < count ? '' : 'none';
+    }}
+  }}
+
+  function updateSessions(sessions) {{
+    // sessions: [{{state, label}}, ...]
+    _sessions = sessions;
+    var n = sessions.length || 1;
+    ensureUnits(n);
+    for (var i = 0; i < n; i++) {{
+      var s = sessions[i] || {{state: 'green', label: ''}};
+      var dot  = document.getElementById('dot-' + i);
+      var lbl  = document.getElementById('label-' + i);
+      var src  = document.getElementById('src-' + i);
+      var unit = document.getElementById('unit-' + i);
+      dot.className  = 'dot ' + s.state;
+      lbl.textContent = STATE_LABELS[s.state] || s.state;
+      src.textContent = (n > 1) ? (s.label || '') : '';
+      unit.className  = 'light-unit active-' + s.state;
+    }}
+  }}
+
+  // 兼容旧的单状态调用
+  function updateState(state) {{
+    updateSessions([{{state: state, label: ''}}]);
+  }}
+
+  function showStats(text) {{
+    var bar = document.getElementById('stats-bar');
+    if (text) {{
+      bar.style.display = '';
+      bar.textContent = text;
+    }} else {{
+      bar.style.display = 'none';
+    }}
+  }}
 </script>
 </body>
 </html>"""
@@ -563,7 +777,6 @@ _WKScriptMessageHandler = objc.protocolNamed("WKScriptMessageHandler")
 class PawCloseHandler(objc.lookUpClass("NSObject"), protocols=[_WKScriptMessageHandler]):
     """接收挂件内关闭按钮点击"""
     def userContentController_didReceiveScriptMessage_(self, controller, message):
-        # 主线程回调：隐藏窗口、更新状态
         _app_delegate_ref[0]._hide_widget()
 
 
@@ -582,37 +795,43 @@ class AppDelegate(NSObject):
         _log("applicationDidFinishLaunching")
         _app_delegate_ref[0] = self
 
-        # 应用以 Accessory 模式运行：无 Dock 图标，无 Cmd+Tab，但可显示窗口
         NSApplication.sharedApplication().setActivationPolicy_(
             NSApplicationActivationPolicyAccessory
         )
 
         # 内部状态
-        self._state         = "green"
-        self._blink_on      = True
-        self._monitor_mode  = get_monitor_mode()
+        self._state          = "green"
+        self._prev_state     = "green"   # 用于检测状态变化触发通知
+        self._blink_on       = True
+        self._monitor_mode   = get_monitor_mode()
         self._widget_enabled = get_widget_enabled()
         self._menubar_hidden = get_menubar_hidden()
+        self._widget_size    = get_widget_size()
+        self._notify_enabled = get_notify_enabled()
         self._selected_project = get_selected_project()
-        self._last_projects = []
+        self._last_projects  = []
         self._last_menu_build_time = 0.0
-        self._wkview        = None
-        self._widget_window = None
+        self._wkview         = None
+        self._widget_window  = None
+
+        # 今日统计
+        self._stats          = _load_stats()
+        self._yellow_start   = 0.0   # 黄灯开始时间，用于统计时长
 
         # 创建 StatusBar 图标
         self._status_bar  = NSStatusBar.systemStatusBar()
-        self._status_item = self._status_bar.statusItemWithLength_(-1)  # NSVariableStatusItemLength
+        self._status_item = self._status_bar.statusItemWithLength_(-1)
         self._status_item.setHighlightMode_(True)
         self._update_status_title()
         self._build_menu()
 
-        # 创建桌面挂件窗口（一次性，之后只 show/hide）
+        # 创建桌面挂件窗口
         self._create_widget_window()
 
         if self._widget_enabled:
             self._show_widget()
 
-        # 启动轮询定时器（主线程 RunLoop）
+        # 启动轮询定时器
         self._poll_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             POLL_INTERVAL, self, "onPollTimer:", None, True
         )
@@ -625,15 +844,37 @@ class AppDelegate(NSObject):
 
     def onPollTimer_(self, timer):
         new_state = self._get_combined_state()
+
+        # 检测状态变化
         if new_state != self._state:
+            old_state = self._state
             self._state   = new_state
             self._blink_on = True
             self._update_status_title()
 
+            # ---- 统计：黄灯时长 ----
+            if old_state == "yellow" and new_state != "yellow":
+                # 黄灯结束
+                elapsed = time.time() - self._yellow_start if self._yellow_start > 0 else 0
+                self._yellow_start = 0.0
+                self._stats = _load_stats()  # 重新加载（防止跨天）
+                self._stats["total_seconds"] += int(elapsed)
+                _save_stats(self._stats)
+            if new_state == "yellow" and old_state != "yellow":
+                # 黄灯开始
+                self._yellow_start = time.time()
+                self._stats = _load_stats()
+                self._stats["runs"] += 1
+                _save_stats(self._stats)
+
+            # ---- 通知：黄→红 ----
+            if self._notify_enabled and old_state == "yellow" and new_state == "red":
+                _send_notification("PawSignal ⚠️", "Agent 执行失败", "Agent 已停止或发生错误，请检查。")
+
         if self._widget_enabled and self._wkview:
             self._push_state_to_widget()
 
-        # 定期刷新菜单（检测新项目）
+        # 定期刷新菜单
         now = time.time()
         if now - self._last_menu_build_time > MENU_REFRESH_INTERVAL:
             projects = list_active_projects()
@@ -664,6 +905,29 @@ class AppDelegate(NSObject):
         if "yellow" in states: return "yellow"
         return "green"
 
+    def _get_session_states(self):
+        """返回各来源的状态列表，用于多会话显示"""
+        sessions = []
+        if self._monitor_mode in (MONITOR_MODE_CLAUDE, MONITOR_MODE_BOTH):
+            projects = list_active_projects()
+            if projects:
+                for p in projects:
+                    sf = get_state_file(p)
+                    try:
+                        content = Path(sf).read_text().strip().lower() if Path(sf).exists() else "green"
+                        st = content if content in ("green","yellow","red") else "green"
+                    except Exception:
+                        st = "green"
+                    sessions.append({"state": st, "label": f"Claude:{p[:8]}"})
+            else:
+                sessions.append({"state": "green", "label": "Claude"})
+        if self._monitor_mode in (MONITOR_MODE_CATPAW, MONITOR_MODE_BOTH):
+            sessions.append({"state": get_catpaw_state(), "label": "CatPaw"})
+        # 如果只有单来源单项目，不显示 label（保持简洁）
+        if len(sessions) == 1:
+            sessions[0]["label"] = ""
+        return sessions
+
     # ── StatusBar 显示 ─────────────────────────────────────
 
     def _update_status_title(self):
@@ -678,7 +942,6 @@ class AppDelegate(NSObject):
             else:
                 lights[0] = LIGHT_ON["red"]
             title = " ".join(lights)
-        # NSStatusItem 用 button（macOS 10.10+）或 title
         try:
             self._status_item.button().setTitle_(title)
         except Exception:
@@ -689,6 +952,21 @@ class AppDelegate(NSObject):
     def _build_menu(self):
         menu = NSMenu.alloc().init()
         menu.setAutoenablesItems_(False)
+
+        # 今日统计摘要（只读）
+        stats = _load_stats()
+        runs = stats.get("runs", 0)
+        secs = stats.get("total_seconds", 0)
+        mins = secs // 60
+        if runs > 0:
+            stats_label = f"📈 今日：执行 {runs} 次，共 {mins} 分钟"
+        else:
+            stats_label = "📈 今日：暂无执行记录"
+        mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(stats_label, None, "")
+        mi.setEnabled_(False)
+        menu.addItem_(mi)
+
+        menu.addItem_(NSMenuItem.separatorItem())
 
         # 桌面挂件开关
         widget_label = "🖥️  桌面挂件：已开启" if self._widget_enabled else "🖥️  桌面挂件：已关闭"
@@ -702,7 +980,34 @@ class AppDelegate(NSObject):
         item.setTarget_(self)
         menu.addItem_(item)
 
+        # 通知开关
+        notify_label = "🔔 状态变化通知：已开启" if self._notify_enabled else "🔔 状态变化通知：已关闭"
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(notify_label, "toggleNotify:", "")
+        item.setTarget_(self)
+        menu.addItem_(item)
+
+        # 开机自启动
+        autostart_label = "🚀 开机自动启动：已开启" if is_launch_agent_enabled() else "🚀 开机自动启动：已关闭"
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(autostart_label, "toggleAutoStart:", "")
+        item.setTarget_(self)
+        menu.addItem_(item)
+
         menu.addItem_(NSMenuItem.separatorItem())
+
+        # 挂件尺寸子菜单
+        size_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("📐 挂件大小", None, "")
+        size_menu   = NSMenu.alloc().init()
+        size_menu.setAutoenablesItems_(False)
+        size_labels = [("small", "🔹 小"), ("medium", "🔷 中（默认）"), ("large", "🔶 大")]
+        for size_key, size_lbl in size_labels:
+            mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(size_lbl, "selectSize:", "")
+            mi.setTarget_(self)
+            mi.setRepresentedObject_(size_key)
+            if size_key == self._widget_size:
+                mi.setState_(1)
+            size_menu.addItem_(mi)
+        size_parent.setSubmenu_(size_menu)
+        menu.addItem_(size_parent)
 
         # 监控模式子菜单
         mode_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("🔍 监控模式", None, "")
@@ -787,6 +1092,18 @@ class AppDelegate(NSObject):
         self._update_status_title()
         self._build_menu()
 
+    def toggleNotify_(self, sender):
+        self._notify_enabled = not self._notify_enabled
+        set_notify_enabled(self._notify_enabled)
+        self._build_menu()
+
+    def toggleAutoStart_(self, sender):
+        if is_launch_agent_enabled():
+            disable_launch_agent()
+        else:
+            enable_launch_agent()
+        self._build_menu()
+
     def selectMode_(self, sender):
         self._monitor_mode = sender.representedObject()
         set_monitor_mode(self._monitor_mode)
@@ -797,24 +1114,47 @@ class AppDelegate(NSObject):
         set_selected_project(self._selected_project)
         self._build_menu()
 
+    def selectSize_(self, sender):
+        self._widget_size = sender.representedObject()
+        set_widget_size(self._widget_size)
+        # 重建挂件窗口（尺寸变了）
+        was_visible = self._widget_enabled
+        old_pos = None
+        if self._widget_window:
+            origin = self._widget_window.frame().origin
+            old_pos = (origin.x, origin.y)
+            self._widget_window.orderOut_(None)
+        self._create_widget_window(restore_pos=old_pos)
+        if was_visible:
+            self._show_widget()
+        self._build_menu()
+
     def quitApp_(self, sender):
         restore_config()
         NSApplication.sharedApplication().terminate_(None)
 
     # ── 桌面挂件 ───────────────────────────────────────────
 
-    def _create_widget_window(self):
-        screen = NSScreen.mainScreen()
-        if screen:
-            sf = screen.visibleFrame()
-            x = sf.origin.x + sf.size.width  - 100 - 20
-            y = sf.origin.y + sf.size.height - 230 - 20
+    def _create_widget_window(self, restore_pos=None):
+        s = WIDGET_SIZES.get(self._widget_size, WIDGET_SIZES["medium"])
+        w, h = s["w"], s["h"]
+
+        # 决定初始位置：优先恢复保存的位置
+        pos = restore_pos or _load_widget_position()
+        if pos:
+            x, y = pos
         else:
-            x, y = 400, 300
-        _log(f"创建挂件窗口，位置=({x:.0f},{y:.0f})")
+            screen = NSScreen.mainScreen()
+            if screen:
+                sf = screen.visibleFrame()
+                x = sf.origin.x + sf.size.width  - w - 20
+                y = sf.origin.y + sf.size.height - h - 20
+            else:
+                x, y = 400, 300
+        _log(f"创建挂件窗口，尺寸=({w},{h})，位置=({x:.0f},{y:.0f})")
 
         win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(x, y, 100, 230),
+            NSMakeRect(x, y, w, h),
             NSBorderlessWindowMask,
             NSBackingStoreBuffered,
             False,
@@ -824,7 +1164,6 @@ class AppDelegate(NSObject):
         win.setOpaque_(False)
         win.setHasShadow_(False)
         win.setMovableByWindowBackground_(True)
-        # canJoinAllSpaces(1<<3) | canManageApplication(1<<2)
         win.setCollectionBehavior_((1 << 2) | (1 << 3))
         win.setReleasedWhenClosed_(False)
 
@@ -835,12 +1174,13 @@ class AppDelegate(NSObject):
         cfg.setUserContentController_(ucc)
 
         wk = DraggableWKWebView.alloc().initWithFrame_configuration_(
-            NSMakeRect(0, 0, 100, 230), cfg
+            NSMakeRect(0, 0, w, h), cfg
         )
         wk.setOpaque_(False)
         wk.setValue_forKey_(False, "drawsBackground")
+        html = _build_widget_html(self._widget_size)
         wk.loadHTMLString_baseURL_(
-            NSString.stringWithString_(WIDGET_HTML),
+            NSString.stringWithString_(html),
             NSURL.URLWithString_("about:blank")
         )
 
@@ -866,9 +1206,23 @@ class AppDelegate(NSObject):
     def _push_state_to_widget(self):
         if not self._wkview:
             return
-        state = self._get_combined_state()
-        js = NSString.stringWithString_(f"updateState('{state}')")
-        self._wkview.evaluateJavaScript_completionHandler_(js, None)
+        sessions = self._get_session_states()
+        # 构造 JS 数组
+        arr = json.dumps(sessions, ensure_ascii=False)
+        js = f"updateSessions({arr})"
+        # 今日统计 bar
+        stats = _load_stats()
+        runs = stats.get("runs", 0)
+        secs = stats.get("total_seconds", 0)
+        mins = secs // 60
+        if runs > 0:
+            stats_text = f"今日 {runs} 次  {mins} 分钟"
+        else:
+            stats_text = ""
+        js += f"; showStats({json.dumps(stats_text)})"
+        self._wkview.evaluateJavaScript_completionHandler_(
+            NSString.stringWithString_(js), None
+        )
 
 
 # ---------- 入口 ----------
@@ -884,11 +1238,9 @@ def main():
     signal.signal(signal.SIGINT,  signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # 启动 CatPaw 日志监听
     _ensure_log_watcher()
 
     app = NSApplication.sharedApplication()
-    # Accessory 模式：无 Dock 图标，可显示窗口
     app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
 
     delegate = AppDelegate.alloc().init()
