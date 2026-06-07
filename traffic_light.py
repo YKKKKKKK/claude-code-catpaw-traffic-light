@@ -17,7 +17,6 @@ Claude Code / CatPaw 顶部栏红绿灯 —— 纯原生 PyObjC 版（无 rumps�
 新功能：
   - 挂件位置记忆：拖动后自动保存，重启恢复
   - 挂件尺寸可调：小/中/大三档，菜单切换
-  - 状态变化通知：黄→红时弹 macOS 系统通知
   - 多会话同时显示：Claude Code 各项目 + CatPaw 各自分行
   - 开机自启动：菜单项写入/移除 LaunchAgents
   - 今日统计：记录执行次数和总时长，菜单显示摘要
@@ -44,7 +43,7 @@ from AppKit import (
     NSBackingStoreBuffered, NSMakeRect, NSScreen,
     NSApplicationActivationPolicyAccessory,
     NSObject, NSRunLoop, NSDate,
-    NSTimer, NSUserNotification, NSUserNotificationCenter,
+    NSTimer,
 )
 from WebKit import WKWebView, WKWebViewConfiguration, WKUserContentController
 from Foundation import NSURL, NSString
@@ -122,7 +121,6 @@ MENUBAR_HIDDEN_FILE   = os.path.join(BASE_DIR, "menubar_hidden")
 # ---- 新增配置文件路径 ----
 WIDGET_POSITION_FILE  = os.path.join(BASE_DIR, "widget_position")   # x,y
 WIDGET_SIZE_FILE      = os.path.join(BASE_DIR, "widget_size")       # small/medium/large
-NOTIFY_ENABLED_FILE   = os.path.join(BASE_DIR, "notify_enabled")
 LAUNCH_AGENT_PLIST    = os.path.expanduser(
     "~/Library/LaunchAgents/com.pawsignal.traffic-light.plist"
 )
@@ -221,22 +219,6 @@ def set_widget_size(size: str):
     except Exception:
         pass
 
-# ---- 通知开关 ----
-def get_notify_enabled():
-    try:
-        if Path(NOTIFY_ENABLED_FILE).exists():
-            return Path(NOTIFY_ENABLED_FILE).read_text().strip() == "1"
-    except Exception:
-        pass
-    return True
-
-def set_notify_enabled(enabled: bool):
-    try:
-        Path(NOTIFY_ENABLED_FILE).parent.mkdir(parents=True, exist_ok=True)
-        Path(NOTIFY_ENABLED_FILE).write_text("1" if enabled else "0")
-    except Exception:
-        pass
-
 # ---- 今日统计 ----
 def _today_str():
     return datetime.date.today().isoformat()
@@ -306,19 +288,6 @@ def disable_launch_agent():
         _log("LaunchAgent 已禁用")
     except Exception as e:
         _log(f"禁用 LaunchAgent 失败: {e}")
-
-# ---- macOS 通知 ----
-def _send_notification(title: str, subtitle: str, body: str):
-    try:
-        n = NSUserNotification.alloc().init()
-        n.setTitle_(title)
-        if subtitle:
-            n.setSubtitle_(subtitle)
-        n.setInformativeText_(body)
-        NSUserNotificationCenter.defaultUserNotificationCenter().deliverNotification_(n)
-    except Exception as e:
-        _log(f"通知发送失败: {e}")
-
 
 # ---------- CatPaw 状态监听 ----------
 _catpaw_state_cache    = "green"
@@ -820,7 +789,6 @@ class AppDelegate(NSObject):
         self._widget_enabled = get_widget_enabled()
         self._menubar_hidden = get_menubar_hidden()
         self._widget_size    = get_widget_size()
-        self._notify_enabled = get_notify_enabled()
         self._selected_project = get_selected_project()
         self._last_projects  = []
         self._last_menu_build_time = 0.0
@@ -879,10 +847,6 @@ class AppDelegate(NSObject):
                 self._stats = _load_stats()
                 self._stats["runs"] += 1
                 _save_stats(self._stats)
-
-            # ---- 通知：黄→红 ----
-            if self._notify_enabled and old_state == "yellow" and new_state == "red":
-                _send_notification("PawSignal ⚠️", "Agent 执行失败", "Agent 已停止或发生错误，请检查。")
 
         if self._widget_enabled and self._wkview:
             self._push_state_to_widget()
@@ -993,12 +957,6 @@ class AppDelegate(NSObject):
         item.setTarget_(self)
         menu.addItem_(item)
 
-        # 通知开关
-        notify_label = "🔔 状态变化通知：已开启" if self._notify_enabled else "🔔 状态变化通知：已关闭"
-        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(notify_label, "toggleNotify:", "")
-        item.setTarget_(self)
-        menu.addItem_(item)
-
         # 开机自启动
         autostart_label = "🚀 开机自动启动：已开启" if is_launch_agent_enabled() else "🚀 开机自动启动：已关闭"
         item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(autostart_label, "toggleAutoStart:", "")
@@ -1103,11 +1061,6 @@ class AppDelegate(NSObject):
         self._menubar_hidden = not self._menubar_hidden
         set_menubar_hidden(self._menubar_hidden)
         self._update_status_title()
-        self._build_menu()
-
-    def toggleNotify_(self, sender):
-        self._notify_enabled = not self._notify_enabled
-        set_notify_enabled(self._notify_enabled)
         self._build_menu()
 
     def toggleAutoStart_(self, sender):
