@@ -128,11 +128,11 @@ LAUNCH_AGENT_PLIST    = os.path.expanduser(
 )
 STATS_FILE            = os.path.join(BASE_DIR, "daily_stats.json")  # 今日统计
 
-# ---- 挂件尺寸预设 ----
+# ---- 挂件尺寸预设（窗口宽度固定，高度自适应内容） ----
 WIDGET_SIZES = {
-    "small":  {"w": 72,  "h": 190, "dot": 16, "card_w": 68,  "pad_v": 10, "gap": 4},
-    "medium": {"w": 100, "h": 230, "dot": 22, "card_w": 88,  "pad_v": 14, "gap": 5},
-    "large":  {"w": 130, "h": 290, "dot": 30, "card_w": 116, "pad_v": 18, "gap": 7},
+    "small":  {"w": 72,  "h": 260, "dot": 16, "card_w": 68,  "pad_v": 10, "gap": 4},
+    "medium": {"w": 100, "h": 290, "dot": 22, "card_w": 88,  "pad_v": 14, "gap": 5},
+    "large":  {"w": 130, "h": 350, "dot": 30, "card_w": 116, "pad_v": 18, "gap": 7},
 }
 
 
@@ -776,12 +776,8 @@ def _build_widget_html(size_key="medium"):
 
   function showStats(text) {{
     var bar = document.getElementById('stats-bar');
-    if (text) {{
-      bar.style.display = 'block';
-      bar.textContent = text;
-    }} else {{
-      bar.style.display = 'none';
-    }}
+    bar.style.display = 'block';
+    bar.textContent = text || '今日 0 次';
   }}
 </script>
 </body>
@@ -1233,10 +1229,10 @@ class AppDelegate(NSObject):
         runs = stats.get("runs", 0)
         secs = stats.get("total_seconds", 0)
         mins = secs // 60
-        if runs > 0:
+        if secs > 0:
             stats_text = f"今日 {runs} 次  {mins} 分钟"
         else:
-            stats_text = ""
+            stats_text = f"今日 {runs} 次"
         js += f"; showStats({json.dumps(stats_text)})"
         self._wkview.evaluateJavaScript_completionHandler_(
             NSString.stringWithString_(js), None
