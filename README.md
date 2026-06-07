@@ -26,7 +26,7 @@
 
 无需安装 Python 或任何依赖，下载即用。
 
-1. 前往 [Releases](https://github.com/DemoJj/claude-code-traffic-light/releases) 页面
+1. 前往 [Releases](https://github.com/YKKKKKKK/claude-code-catpaw-traffic-light/releases) 页面
 2. 下载最新版 **`PawSignal-v2.1.0.dmg`**
 3. 打开 DMG，将 **PawSignal.app** 拖入「应用程序」文件夹
 4. 双击启动，菜单栏出现红绿灯图标即表示运行成功 🎉
@@ -121,7 +121,7 @@
 ## 🔨 从源码构建
 
 ```bash
-git clone https://github.com/DemoJj/claude-code-traffic-light.git
+git clone https://github.com/YKKKKKKK/claude-code-catpaw-traffic-light.git
 cd claude-code-traffic-light
 
 # 创建虚拟环境并安装依赖
