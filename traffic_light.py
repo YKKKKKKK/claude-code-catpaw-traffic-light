@@ -799,6 +799,7 @@ def _build_widget_html(size_key="medium"):
 
   // ── 固定三灯 ──
   function updateState(state, yellowStartMs) {{
+    var prevState = _currentState;
     _currentState = state;
     var dots  = {{ red: document.getElementById('dot-red'), yellow: document.getElementById('dot-yellow'), green: document.getElementById('dot-green') }};
     var units = {{ red: document.getElementById('unit-red'), yellow: document.getElementById('unit-yellow'), green: document.getElementById('unit-green') }};
@@ -808,12 +809,16 @@ def _build_widget_html(size_key="medium"):
     else if (state === 'yellow') {{ dots.yellow.className = 'dot yellow'; units.yellow.className = 'light-unit active-yellow'; }}
     else                         {{ dots.green.className = 'dot green';   units.green.className  = 'light-unit active-green'; }}
 
-    // 黄灯实时计时
+    // 黄灯实时计时：只在第一次进入黄灯时初始化，避免被反复重置
     var elapsedBar = document.getElementById('elapsed-bar');
     if (state === 'yellow') {{
-      _yellowStartTs = yellowStartMs || Date.now();
-      elapsedBar.style.display = 'block';
-      _startElapsedTimer();
+      if (prevState !== 'yellow') {{
+        // 刚切换到黄灯：用 Python 传来的起始时间戳初始化
+        _yellowStartTs = (yellowStartMs && yellowStartMs > 0) ? yellowStartMs : Date.now();
+        elapsedBar.style.display = 'block';
+        _startElapsedTimer();
+      }}
+      // 已经是黄灯：什么都不做，让定时器自己跑
     }} else {{
       elapsedBar.style.display = 'none';
       _yellowStartTs = 0;
