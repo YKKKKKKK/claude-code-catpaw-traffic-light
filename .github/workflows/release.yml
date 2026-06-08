@@ -33,7 +33,14 @@ jobs:
           pip install -r requirements.txt
 
       - name: Build app
-        run: bash build.sh
+        run: |
+          pyinstaller \
+            --name "PawSignal" \
+            --windowed \
+            --noconfirm \
+            --clean \
+            --icon "traffic_light.icns" \
+            traffic_light.py
 
       - name: Get version
         id: version
@@ -46,21 +53,21 @@ jobs:
 
       - name: Create DMG
         run: |
-          hdiutil create -volname "ClaudeTrafficLight" \
-            -srcfolder dist/ClaudeTrafficLight.app \
+          hdiutil create -volname "PawSignal" \
+            -srcfolder dist/PawSignal.app \
             -ov -format UDZO \
-            dist/ClaudeTrafficLight-${{ steps.version.outputs.version }}.dmg
+            dist/PawSignal-${{ steps.version.outputs.version }}.dmg
 
       - name: Zip app
-        run: cd dist && zip -r ClaudeTrafficLight.app.zip ClaudeTrafficLight.app
+        run: cd dist && zip -r PawSignal.app.zip PawSignal.app
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ClaudeTrafficLight-${{ steps.version.outputs.version }}
+          name: PawSignal-${{ steps.version.outputs.version }}
           path: |
-            dist/ClaudeTrafficLight.app.zip
-            dist/ClaudeTrafficLight-${{ steps.version.outputs.version }}.dmg
+            dist/PawSignal.app.zip
+            dist/PawSignal-${{ steps.version.outputs.version }}.dmg
 
   release:
     needs: build
@@ -70,38 +77,32 @@ jobs:
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: ClaudeTrafficLight-${{ needs.build.outputs.version }}
+          name: PawSignal-${{ needs.build.outputs.version }}
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Claude Code Traffic Light v${{ needs.build.outputs.version }}
+          name: PawSignal v${{ needs.build.outputs.version }}
           body: |
-            ## Claude Code Traffic Light v${{ needs.build.outputs.version }}
+            ## PawSignal v${{ needs.build.outputs.version }}
+
+            > macOS 菜单栏红绿灯 —— 实时监控 Claude Code 和 CatPaw Agent 的工作状态
 
             ### 安装说明
 
-            **方式一：直接下载 .app**
-            1. 下载 `ClaudeTrafficLight.app.zip`
-            2. 解压后将 `ClaudeTrafficLight.app` 拖入 Applications 文件夹
-            3. 双击启动
-
-            **方式二：下载 DMG 安装包**
-            1. 下载 `ClaudeTrafficLight-${{ needs.build.outputs.version }}.dmg`
-            2. 双击打开 DMG，将应用拖入 Applications 文件夹
+            **方式一：下载 DMG 安装包（推荐）**
+            1. 下载 `PawSignal-${{ needs.build.outputs.version }}.dmg`
+            2. 双击打开 DMG，将 **PawSignal.app** 拖入「应用程序」文件夹
             3. 启动应用
 
-            ### 功能特性
-
-            - 🟢 绿灯常亮 — 会话进行中
-            - 🟡 黄灯闪烁 — 需要确认
-            - 🔴 红灯常亮 — 会话结束
-            - 多项目支持
-            - 自动配置 Claude Code hooks
+            **方式二：直接下载 .app**
+            1. 下载 `PawSignal.app.zip`
+            2. 解压后将 `PawSignal.app` 拖入「应用程序」文件夹
+            3. 双击启动
 
             ### 系统要求
 
-            - macOS 10.15+
+            - macOS（Apple Silicon，M1/M2/M3/M4）
 
             ### ⚠️ macOS 安全提示（"无法验证开发者"）
 
@@ -113,11 +114,11 @@ jobs:
             2. 或者右键点击应用 → 选择 **"打开"**，再次弹窗时点击 **"打开"**
             3. 如果以上都不行，打开终端执行：
                ```bash
-               xattr -cr /Applications/ClaudeTrafficLight.app
+               xattr -cr /Applications/PawSignal.app
                ```
                然后正常双击打开即可。
           files: |
-            ClaudeTrafficLight.app.zip
-            ClaudeTrafficLight-${{ needs.build.outputs.version }}.dmg
+            PawSignal.app.zip
+            PawSignal-${{ needs.build.outputs.version }}.dmg
           draft: false
           prerelease: false
