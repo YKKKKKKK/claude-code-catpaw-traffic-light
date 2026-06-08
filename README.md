@@ -35,6 +35,20 @@
 
 ---
 
+## ❓ 常见问题
+
+### 提示"文件已损坏"或"无法验证开发者"
+
+这是 macOS Gatekeeper 的安全拦截，并非真的文件损坏，因为此应用未经 Apple 公证（Notarization）。
+
+**解决方法：** 打开终端，执行以下命令，然后重新双击启动即可：
+
+```bash
+xattr -cr /Applications/PawSignal.app
+```
+
+---
+
 ## 🖥 界面预览
 
 菜单栏红绿灯：
