@@ -528,7 +528,22 @@ def restore_config():
             pass
     if Path(STATE_DIR).exists():
         try:
-            shutil.rmtree(STATE_DIR)
+            # 只删除 .state 文件和 settings_backup，保留统计/配置文件
+            KEEP_FILES = {
+                "daily_stats.json",
+                "widget_position",
+                "widget_size",
+                "monitor_mode",
+                "widget_enabled",
+                "menubar_hidden",
+                "selected_project",
+            }
+            for f in Path(STATE_DIR).iterdir():
+                if f.name not in KEEP_FILES:
+                    try:
+                        f.unlink() if f.is_file() else shutil.rmtree(f)
+                    except Exception:
+                        pass
         except Exception:
             pass
     old_file = os.path.expanduser("~/.claude/.traffic_light")
