@@ -1286,7 +1286,7 @@ class AppDelegate(NSObject):
         menu.addItem_(mi)
         # token 统计行（仅 Claude 模式有数据时显示）
         if tokens > 0:
-            token_label = f"🔢 今日 Token：{_format_tokens(tokens)}"
+            token_label = f"🔢 今日 Claude Token：{_format_tokens(tokens)}"
             mi2 = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(token_label, None, "")
             mi2.setEnabled_(False)
             menu.addItem_(mi2)
@@ -1541,7 +1541,7 @@ class AppDelegate(NSObject):
         if secs > 0:
             parts.append(dur_text)
         if tokens > 0:
-            parts.append(f"{_format_tokens(tokens)} tokens")
+            parts.append(f"Claude {_format_tokens(tokens)} tokens")
         stats_text = "  ".join(parts)
         js += f"; showStats({json.dumps(stats_text)})"
         self._wkview.evaluateJavaScript_completionHandler_(
