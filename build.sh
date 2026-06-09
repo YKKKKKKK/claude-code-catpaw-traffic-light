@@ -4,10 +4,21 @@ set -e
 echo "=== PawSignal 构建脚本 ==="
 echo ""
 
-# 检查虚拟环境
+# 使用 arm64 版 Python（Apple Silicon 原生）
+ARM64_PYTHON=~/miniconda3-arm64/bin/python3
+
+# 检查虚拟环境（如果已有 venv 但不是 arm64，则重建）
+if [ -d "venv" ]; then
+    VENV_ARCH=$(venv/bin/python3 -c "import platform; print(platform.machine())" 2>/dev/null || echo "unknown")
+    if [ "$VENV_ARCH" != "arm64" ]; then
+        echo "检测到旧 venv 非 arm64（$VENV_ARCH），重建..."
+        rm -rf venv
+    fi
+fi
+
 if [ ! -d "venv" ]; then
-    echo "创建虚拟环境..."
-    python3 -m venv venv
+    echo "创建 arm64 虚拟环境..."
+    $ARM64_PYTHON -m venv venv
 fi
 
 source venv/bin/activate
