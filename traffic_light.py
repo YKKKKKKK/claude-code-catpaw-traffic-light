@@ -129,6 +129,7 @@ LAUNCH_AGENT_PLIST    = os.path.expanduser(
     "~/Library/LaunchAgents/com.pawsignal.traffic-light.plist"
 )
 STATS_FILE            = os.path.join(BASE_DIR, "daily_stats.json")  # 今日统计
+CLAUDE_PROJECTS_DIR   = os.path.expanduser("~/.claude/projects")        # Claude Code 会话日志
 
 # ---- 挂件尺寸预设（窗口宽度固定，高度自适应内容） ----
 WIDGET_SH = 0   # 不留阴影边距，彻底无阴影
@@ -253,10 +254,14 @@ def _load_stats():
         if Path(STATS_FILE).exists():
             data = json.loads(Path(STATS_FILE).read_text())
             if data.get("date") == _today_str():
+                # 兼容旧版（无 token 字段）
+                data.setdefault("total_tokens", 0)
+                data.setdefault("scanned_uuids", [])
                 return data
     except Exception:
         pass
-    return {"date": _today_str(), "runs": 0, "total_seconds": 0}
+    return {"date": _today_str(), "runs": 0, "total_seconds": 0,
+            "total_tokens": 0, "scanned_uuids": []}
 
 def _save_stats(data):
     try:
@@ -264,6 +269,74 @@ def _save_stats(data):
         Path(STATS_FILE).write_text(json.dumps(data))
     except Exception:
         pass
+
+def _format_tokens(tokens):
+    """将 token 数格式化为可读字符串"""
+    if tokens < 1000:
+        return f"{tokens}"
+    elif tokens < 10000:
+        return f"{tokens/1000:.1f}k"
+    else:
+        return f"{round(tokens/1000)}k"
+
+# ---- 今日 token 扫描 ----
+_token_scan_lock = threading.Lock()
+
+def _scan_today_tokens():
+    """扫描 ~/.claude/projects/ 下今日的 JSONL，统计 token 用量，增量更新 stats"""
+    today = _today_str()  # e.g. "2026-06-09"
+    projects_dir = Path(CLAUDE_PROJECTS_DIR)
+    if not projects_dir.exists():
+        return
+    with _token_scan_lock:
+        stats = _load_stats()
+        scanned = set(stats.get("scanned_uuids", []))
+        new_tokens = 0
+        new_uuids = []
+        try:
+            for jsonl_file in projects_dir.rglob("*.jsonl"):
+                try:
+                    with open(jsonl_file, "r", encoding="utf-8", errors="replace") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                obj = json.loads(line)
+                            except Exception:
+                                continue
+                            # 只处理 assistant 消息，有 usage 字段
+                            if obj.get("type") != "assistant":
+                                continue
+                            uuid = obj.get("uuid", "")
+                            if not uuid or uuid in scanned:
+                                continue
+                            # 检查时间戳是否是今天
+                            ts = obj.get("timestamp", "")
+                            if not ts.startswith(today):
+                                continue
+                            usage = obj.get("message", {}).get("usage", {})
+                            if not usage:
+                                continue
+                            tokens = (
+                                usage.get("input_tokens", 0)
+                                + usage.get("cache_creation_input_tokens", 0)
+                                + usage.get("cache_read_input_tokens", 0)
+                                + usage.get("output_tokens", 0)
+                            )
+                            new_tokens += tokens
+                            new_uuids.append(uuid)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        if new_tokens > 0 or new_uuids:
+            stats = _load_stats()  # 重新加载防止并发覆盖
+            stats["total_tokens"] = stats.get("total_tokens", 0) + new_tokens
+            existing = set(stats.get("scanned_uuids", []))
+            existing.update(new_uuids)
+            stats["scanned_uuids"] = list(existing)
+            _save_stats(stats)
 
 def _format_duration(secs):
     """将秒数格式化为可读字符串：不满60秒显示秒，否则显示分钟"""
@@ -1196,8 +1269,9 @@ class AppDelegate(NSObject):
 
         # 今日统计摘要（只读）—— 黄灯时额外显示已执行秒数
         stats = _load_stats()
-        runs  = stats.get("runs", 0)
-        secs  = stats.get("total_seconds", 0)
+        runs   = stats.get("runs", 0)
+        secs   = stats.get("total_seconds", 0)
+        tokens = stats.get("total_tokens", 0)
         dur_text = _format_duration(secs) if secs > 0 else "0 秒"
         if runs > 0:
             stats_label = f"📈 今日：执行 {runs} 次，共 {dur_text}"
@@ -1210,6 +1284,12 @@ class AppDelegate(NSObject):
         mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(stats_label, None, "")
         mi.setEnabled_(False)
         menu.addItem_(mi)
+        # token 统计行（仅 Claude 模式有数据时显示）
+        if tokens > 0:
+            token_label = f"🔢 今日 Token：{_format_tokens(tokens)}"
+            mi2 = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(token_label, None, "")
+            mi2.setEnabled_(False)
+            menu.addItem_(mi2)
 
         menu.addItem_(NSMenuItem.separatorItem())
 
@@ -1453,13 +1533,16 @@ class AppDelegate(NSObject):
         js = f"updateState('{combined}', {yellow_start_ms}, {needs_confirm}); updateSessions({arr})"
         # 今日统计 bar
         stats = _load_stats()
-        runs = stats.get("runs", 0)
-        secs = stats.get("total_seconds", 0)
+        runs   = stats.get("runs", 0)
+        secs   = stats.get("total_seconds", 0)
+        tokens = stats.get("total_tokens", 0)
         dur_text = _format_duration(secs) if secs > 0 else ""
+        parts = [f"今日 {runs} 次"]
         if secs > 0:
-            stats_text = f"今日 {runs} 次  {dur_text}"
-        else:
-            stats_text = f"今日 {runs} 次"
+            parts.append(dur_text)
+        if tokens > 0:
+            parts.append(f"{_format_tokens(tokens)} tokens")
+        stats_text = "  ".join(parts)
         js += f"; showStats({json.dumps(stats_text)})"
         self._wkview.evaluateJavaScript_completionHandler_(
             NSString.stringWithString_(js), None
@@ -1480,6 +1563,17 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
 
     _ensure_log_watcher()
+
+    # 启动 token 扫描后台线程（每 30 秒增量扫描一次）
+    def _token_scan_loop():
+        while True:
+            try:
+                _scan_today_tokens()
+            except Exception:
+                pass
+            time.sleep(30)
+    t = threading.Thread(target=_token_scan_loop, daemon=True)
+    t.start()
 
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
