@@ -520,7 +520,18 @@ def _start_watcher_for_path(log_path, watcher_fn):
         if path_str in _catpaw_watched_paths:
             return
         _catpaw_watched_paths.add(path_str)
-    t = threading.Thread(target=watcher_fn, args=(path_str,), daemon=True)
+
+    def _wrapper():
+        try:
+            watcher_fn(path_str)
+        finally:
+            # 线程结束（含日志轮转 break）后，从已监听集合中移除
+            # 下次扫描器扫到同路径时会重新启动新线程
+            with _catpaw_watcher_lock:
+                _catpaw_watched_paths.discard(path_str)
+            _log(f"CatPaw 日志监听已退出，等待重连: {path_str}")
+
+    t = threading.Thread(target=_wrapper, daemon=True)
     t.start()
     _log(f"CatPaw 日志监听已启动: {path_str}")
 
