@@ -1198,18 +1198,22 @@ class AppDelegate(NSObject):
     # ── 状态计算 ───────────────────────────────────────────
 
     def _get_combined_state(self):
-        """返回聚合灯色：permission 也归为 yellow 显示"""
+        """返回聚合灯色：遍历所有 Claude 项目，取最高优先级（red > yellow > green）"""
         states = []
         if self._monitor_mode in (MONITOR_MODE_CLAUDE, MONITOR_MODE_BOTH):
-            sf = get_state_file(self._selected_project)
-            try:
-                content = Path(sf).read_text().strip().lower() if Path(sf).exists() else "green"
-                # permission 显示为黄灯
-                if content == "permission":
-                    states.append("yellow")
-                else:
-                    states.append(content if content in ("green","yellow","red") else "green")
-            except Exception:
+            for p in list_active_projects():
+                sf = get_state_file(p)
+                try:
+                    content = Path(sf).read_text().strip().lower() if Path(sf).exists() else "green"
+                    # permission 显示为黄灯
+                    if content == "permission":
+                        states.append("yellow")
+                    else:
+                        states.append(content if content in ("green","yellow","red") else "green")
+                except Exception:
+                    states.append("green")
+            # 无任何项目时默认绿灯
+            if not states:
                 states.append("green")
         if self._monitor_mode in (MONITOR_MODE_CATPAW, MONITOR_MODE_BOTH):
             states.append(get_catpaw_state())
