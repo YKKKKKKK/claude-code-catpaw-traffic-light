@@ -1374,7 +1374,7 @@ class AppDelegate(NSObject):
         mode_parent.setSubmenu_(mode_menu)
         menu.addItem_(mode_parent)
 
-        # 项目子菜单（仅 Claude 模式显示）
+        # 项目列表（只读展示，显示各项目当前灯色）
         if self._monitor_mode in (MONITOR_MODE_CLAUDE, MONITOR_MODE_BOTH):
             proj_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("📁 Claude 项目", None, "")
             proj_menu   = NSMenu.alloc().init()
@@ -1386,11 +1386,21 @@ class AppDelegate(NSObject):
                 proj_menu.addItem_(pi)
             else:
                 for p in projects:
-                    pi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(f"  {p}", "selectProject:", "")
-                    pi.setTarget_(self)
-                    pi.setRepresentedObject_(p)
-                    if p == self._selected_project:
-                        pi.setState_(1)
+                    sf = get_state_file(p)
+                    try:
+                        content = Path(sf).read_text().strip().lower() if Path(sf).exists() else "green"
+                        if content in ("yellow", "permission"):
+                            dot = "🟡"
+                        elif content == "red":
+                            dot = "🔴"
+                        else:
+                            dot = "🟢"
+                    except Exception:
+                        dot = "🟢"
+                    pi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                        f"  {dot}  {p}", None, ""
+                    )
+                    pi.setEnabled_(False)
                     proj_menu.addItem_(pi)
             proj_parent.setSubmenu_(proj_menu)
             menu.addItem_(proj_parent)
@@ -1455,11 +1465,6 @@ class AppDelegate(NSObject):
     def selectMode_(self, sender):
         self._monitor_mode = sender.representedObject()
         set_monitor_mode(self._monitor_mode)
-        self._build_menu()
-
-    def selectProject_(self, sender):
-        self._selected_project = sender.representedObject().strip()
-        set_selected_project(self._selected_project)
         self._build_menu()
 
     def selectSize_(self, sender):
