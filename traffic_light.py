@@ -109,6 +109,7 @@ BLINK_INTERVAL = 0.5
 MENU_REFRESH_INTERVAL = 2
 
 TRAFFIC_MARKER = "traffic_light_app"
+APP_VERSION    = "2.2.0"
 
 LIGHT_ON  = {"red": "🔴", "yellow": "🟡", "green": "🟢"}
 LIGHT_OFF = "⚫"
@@ -1400,6 +1401,13 @@ class AppDelegate(NSObject):
             menu.addItem_(mi)
 
         menu.addItem_(NSMenuItem.separatorItem())
+
+        # 版本号（只读）
+        ver_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            f"PawSignal v{APP_VERSION}", None, ""
+        )
+        ver_item.setEnabled_(False)
+        menu.addItem_(ver_item)
 
         # 退出
         quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("退出", "quitApp:", "q")
