@@ -1283,6 +1283,17 @@ class AppDelegate(NSObject):
         menu = NSMenu.alloc().init()
         menu.setAutoenablesItems_(False)
 
+        # 监控项目数提示
+        if self._monitor_mode in (MONITOR_MODE_CLAUDE, MONITOR_MODE_BOTH):
+            project_count = len(list_active_projects())
+            if project_count > 0:
+                monitor_label = f"🔭 监控中：{project_count} 个 Claude 项目（所有项目均已监控）"
+            else:
+                monitor_label = "🔭 监控中：暂无活跃 Claude 项目"
+            mi0 = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(monitor_label, None, "")
+            mi0.setEnabled_(False)
+            menu.addItem_(mi0)
+
         # 今日统计摘要（只读）—— 黄灯时额外显示已执行秒数
         stats = _load_stats()
         runs   = stats.get("runs", 0)
