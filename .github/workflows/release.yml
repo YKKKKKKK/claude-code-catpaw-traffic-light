@@ -88,6 +88,14 @@ jobs:
 
             > macOS 菜单栏红绿灯 —— 实时监控 Claude Code 和 CatPaw Agent 的工作状态
 
+            ### 🆕 v2.2.0 更新内容
+
+            - ✅ **多项目同时监听**：Claude Code 多个项目同时运行时，任一项目在执行即亮黄灯，不再只监听单个项目
+            - 📊 **今日 Claude Token 统计**：自动扫描 `~/.claude/projects/` 日志，菜单栏和挂件实时显示今日 Token 消耗（每 30 秒增量更新）
+            - 🐛 **修复退出后统计清零**：退出时不再删除统计文件，今日执行次数、时长、Token 数重启后不丢失
+            - 🔄 **修复日志轮转导致监听中断**：IDEA 日志轮转后自动重连，无需重启 PawSignal
+            - 🍎 **Apple Silicon 原生打包**：二进制改为 arm64 原生，不再经过 Rosetta 2
+
             ### 安装说明
 
             **方式一：下载 DMG 安装包（推荐）**
@@ -108,15 +116,10 @@ jobs:
 
             首次打开时，macOS 可能会弹出 **"无法验证开发者"** 或 **"Apple 无法检查是否包含恶意软件"** 的提示，这是正常的——因为此应用未经 Apple 公证（Notarization）。
 
-            **解决方法：**
-
-            1. 在「系统设置 → 隐私与安全性」底部，点击 **"仍要打开"**
-            2. 或者右键点击应用 → 选择 **"打开"**，再次弹窗时点击 **"打开"**
-            3. 如果以上都不行，打开终端执行：
-               ```bash
-               xattr -cr /Applications/PawSignal.app
-               ```
-               然后正常双击打开即可。
+            **解决方法：** 打开终端执行以下命令后重新双击启动：
+            ```bash
+            xattr -cr /Applications/PawSignal.app
+            ```
           files: |
             PawSignal.app.zip
             PawSignal-${{ needs.build.outputs.version }}.dmg
