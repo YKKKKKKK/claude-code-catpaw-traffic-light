@@ -26,8 +26,9 @@ Claude Code / CatPaw 顶部栏红绿灯 —— 纯原生 PyObjC 版（无 rumps�
   - 菜单栏实时秒数：黄灯执行时菜单顶部显示已执行秒数
 """
 import json
-import sys
 import os
+import sys
+
 if getattr(sys, 'frozen', False):
     os.chdir(os.path.dirname(sys.executable))
 import shutil
@@ -74,8 +75,7 @@ class DraggableWKWebView(WKWebView):
             new_x = screen_pt.x - self._drag_offset_x
             new_y = screen_pt.y - self._drag_offset_y
             self.window().setFrameOrigin_((new_x, new_y))
-            # 拖动结束时保存位置（每次 drag 都保，频率可接受）
-            _save_widget_position(new_x, new_y)
+            # 位置只在 mouseUp_ 时保存，避免拖拽时高频写文件
         except Exception:
             pass
 
@@ -109,7 +109,7 @@ BLINK_INTERVAL = 0.5
 MENU_REFRESH_INTERVAL = 2
 
 TRAFFIC_MARKER = "traffic_light_app"
-APP_VERSION    = "2.2.0"
+APP_VERSION    = "2.2.2"
 
 LIGHT_ON  = {"red": "🔴", "yellow": "🟡", "green": "🟢"}
 LIGHT_OFF = "⚫"
@@ -1101,9 +1101,15 @@ class AppDelegate(NSObject):
         self._wkview         = None
         self._widget_window  = None
 
-        # 今日统计
+        # 今日统计（缓存，写入后由调用方 invalidate）
         self._stats          = _load_stats()
         self._yellow_start   = 0.0   # 黄灯开始时间，用于统计时长
+
+        # ── 每 tick 缓存，避免重复磁盘 I/O ──
+        # { project_name: "green"/"yellow"/"red"/"permission" }
+        self._tick_project_states: dict = {}
+        # 上次推送到挂件的内容，无变化时跳过 JS eval
+        self._last_widget_js: str = ""
 
         # 创建 StatusBar 图标
         self._status_bar  = NSStatusBar.systemStatusBar()
@@ -1138,6 +1144,9 @@ class AppDelegate(NSObject):
     # ── 定时器回调 ──────────────────────────────────────────
 
     def onPollTimer_(self, timer):
+        # ── 每 tick 只读一次磁盘：统一刷新 project states 缓存 ──
+        self._refresh_tick_cache()
+
         new_state = self._get_combined_state()
 
         # 检测状态变化
@@ -1152,7 +1161,8 @@ class AppDelegate(NSObject):
                 # 黄灯结束
                 elapsed = time.time() - self._yellow_start if self._yellow_start > 0 else 0
                 self._yellow_start = 0.0
-                self._stats = _load_stats()  # 重新加载（防止跨天）
+                # 重新加载防止跨天或 token 扫描线程的并发写覆盖
+                self._stats = _load_stats()
                 self._stats["total_seconds"] += int(elapsed)
                 _save_stats(self._stats)
             if new_state == "yellow" and old_state != "yellow":
@@ -1168,15 +1178,14 @@ class AppDelegate(NSObject):
         if self._widget_enabled and self._wkview:
             self._push_state_to_widget()
 
-        # 定期刷新菜单（包含实时秒数）
+        # 定期刷新菜单（黄灯时更新实时秒数；项目列表变化时更新）
         now = time.time()
         if now - self._last_menu_build_time > MENU_REFRESH_INTERVAL:
-            projects = list_active_projects()
+            projects = list(self._tick_project_states.keys())
             if projects and self._selected_project not in projects:
                 self._selected_project = projects[0]
                 set_selected_project(self._selected_project)
             if projects != self._last_projects or self._state == "yellow":
-                # 黄灯时每次刷新都重建菜单（更新实时秒数）
                 self._build_menu()
 
     def onBlinkTimer_(self, timer):
@@ -1196,24 +1205,37 @@ class AppDelegate(NSObject):
                 self._widget_window.setFrameOrigin_((nx, ny))
                 _save_widget_position(nx, ny)
 
+    # ── 每 tick 磁盘读取缓存 ───────────────────────────────
+
+    def _refresh_tick_cache(self):
+        """每 tick 调用一次：读取所有 .state 文件，缓存到 self._tick_project_states。
+        后续 _get_combined_state / _needs_confirm / _get_session_states / _build_menu
+        均从缓存读取，不再重复 I/O。"""
+        result = {}
+        try:
+            Path(STATE_DIR).mkdir(parents=True, exist_ok=True)
+            for f in sorted(Path(STATE_DIR).glob("*.state")):
+                try:
+                    content = f.read_text().strip().lower()
+                    result[f.stem] = content
+                except Exception:
+                    result[f.stem] = "green"
+        except Exception:
+            pass
+        self._tick_project_states = result
+
     # ── 状态计算 ───────────────────────────────────────────
 
     def _get_combined_state(self):
         """返回聚合灯色：遍历所有 Claude 项目，取最高优先级（red > yellow > green）"""
         states = []
         if self._monitor_mode in (MONITOR_MODE_CLAUDE, MONITOR_MODE_BOTH):
-            for p in list_active_projects():
-                sf = get_state_file(p)
-                try:
-                    content = Path(sf).read_text().strip().lower() if Path(sf).exists() else "green"
-                    # permission 显示为黄灯
-                    if content == "permission":
-                        states.append("yellow")
-                    else:
-                        states.append(content if content in ("green","yellow","red") else "green")
-                except Exception:
-                    states.append("green")
-            # 无任何项目时默认绿灯
+            for raw in self._tick_project_states.values():
+                # permission 显示为黄灯
+                if raw == "permission":
+                    states.append("yellow")
+                else:
+                    states.append(raw if raw in ("green", "yellow", "red") else "green")
             if not states:
                 states.append("green")
         if self._monitor_mode in (MONITOR_MODE_CATPAW, MONITOR_MODE_BOTH):
@@ -1225,13 +1247,7 @@ class AppDelegate(NSObject):
     def _needs_confirm(self):
         """检查是否有任何项目处于 permission（等待用户确认）状态"""
         if self._monitor_mode in (MONITOR_MODE_CLAUDE, MONITOR_MODE_BOTH):
-            for p in list_active_projects():
-                sf = get_state_file(p)
-                try:
-                    if Path(sf).exists() and Path(sf).read_text().strip().lower() == "permission":
-                        return True
-                except Exception:
-                    pass
+            return any(v == "permission" for v in self._tick_project_states.values())
         return False
 
     def _get_session_states(self):
@@ -1239,15 +1255,9 @@ class AppDelegate(NSObject):
         sessions = []
         if self._monitor_mode in (MONITOR_MODE_CLAUDE, MONITOR_MODE_BOTH):
             # 多个项目聚合为一个 Claude 条目，取最高优先级状态（red > yellow > green）
-            projects = list_active_projects()
             agg = "green"
-            for p in projects:
-                sf = get_state_file(p)
-                try:
-                    content = Path(sf).read_text().strip().lower() if Path(sf).exists() else "green"
-                    st = content if content in ("green","yellow","red") else "green"
-                except Exception:
-                    st = "green"
+            for raw in self._tick_project_states.values():
+                st = raw if raw in ("green", "yellow", "red") else "green"
                 if st == "red" or (st == "yellow" and agg != "red"):
                     agg = st
             sessions.append({"state": agg, "label": "Claude"})
@@ -1283,9 +1293,9 @@ class AppDelegate(NSObject):
         menu = NSMenu.alloc().init()
         menu.setAutoenablesItems_(False)
 
-        # 监控项目数提示
+        # 监控项目数提示（使用 tick 缓存，无额外磁盘 I/O）
         if self._monitor_mode in (MONITOR_MODE_CLAUDE, MONITOR_MODE_BOTH):
-            project_count = len(list_active_projects())
+            project_count = len(self._tick_project_states)
             if project_count > 0:
                 monitor_label = f"🔭 监控中：{project_count} 个 Claude 项目（所有项目均已监控）"
             else:
@@ -1360,9 +1370,9 @@ class AppDelegate(NSObject):
         mode_menu   = NSMenu.alloc().init()
         mode_menu.setAutoenablesItems_(False)
         mode_items = [
-(MONITOR_MODE_BOTH,   "🔀 两者都监控（Claude + CatPaw）"),
-        (MONITOR_MODE_CLAUDE, "🤖 仅 Claude"),
-        (MONITOR_MODE_CATPAW, "🐾 仅 CatPaw"),
+            (MONITOR_MODE_BOTH,   "🔀 两者都监控（Claude + CatPaw）"),
+            (MONITOR_MODE_CLAUDE, "🤖 仅 Claude"),
+            (MONITOR_MODE_CATPAW, "🐾 仅 CatPaw"),
         ]
         for mode_key, mode_label in mode_items:
             mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(mode_label, "selectMode:", "")
@@ -1374,28 +1384,22 @@ class AppDelegate(NSObject):
         mode_parent.setSubmenu_(mode_menu)
         menu.addItem_(mode_parent)
 
-        # 项目列表（只读展示，显示各项目当前灯色）
+        # 项目列表（只读展示，显示各项目当前灯色；使用 tick 缓存）
         if self._monitor_mode in (MONITOR_MODE_CLAUDE, MONITOR_MODE_BOTH):
             proj_parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("📁 Claude 项目", None, "")
             proj_menu   = NSMenu.alloc().init()
             proj_menu.setAutoenablesItems_(False)
-            projects = list_active_projects()
-            if not projects:
+            if not self._tick_project_states:
                 pi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("  (无活跃项目)", None, "")
                 pi.setEnabled_(False)
                 proj_menu.addItem_(pi)
             else:
-                for p in projects:
-                    sf = get_state_file(p)
-                    try:
-                        content = Path(sf).read_text().strip().lower() if Path(sf).exists() else "green"
-                        if content in ("yellow", "permission"):
-                            dot = "🟡"
-                        elif content == "red":
-                            dot = "🔴"
-                        else:
-                            dot = "🟢"
-                    except Exception:
+                for p, raw in self._tick_project_states.items():
+                    if raw in ("yellow", "permission"):
+                        dot = "🟡"
+                    elif raw == "red":
+                        dot = "🔴"
+                    else:
                         dot = "🟢"
                     pi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                         f"  {dot}  {p}", None, ""
@@ -1404,9 +1408,9 @@ class AppDelegate(NSObject):
                     proj_menu.addItem_(pi)
             proj_parent.setSubmenu_(proj_menu)
             menu.addItem_(proj_parent)
-            self._last_projects = projects
+            self._last_projects = list(self._tick_project_states.keys())
         else:
-            self._last_projects = list_active_projects()
+            self._last_projects = list(self._tick_project_states.keys())
 
         menu.addItem_(NSMenuItem.separatorItem())
 
@@ -1562,16 +1566,16 @@ class AppDelegate(NSObject):
     def _push_state_to_widget(self):
         if not self._wkview:
             return
-        # 1. 更新固定三灯（根据聚合状态）
-        combined = self._get_combined_state()
+        # 1. 更新固定三灯（根据聚合状态）—— 直接用已算好的 self._state
+        combined = self._state
         sessions = self._get_session_states()
         arr = json.dumps(sessions, ensure_ascii=False)
         # 传入黄灯开始的 JS 时间戳（毫秒），让 JS 端自行计时
         yellow_start_ms = int(self._yellow_start * 1000) if self._yellow_start > 0 else 0
         needs_confirm = "true" if self._needs_confirm() else "false"
         js = f"updateState('{combined}', {yellow_start_ms}, {needs_confirm}); updateSessions({arr})"
-        # 今日统计 bar
-        stats = _load_stats()
+        # 今日统计 bar（使用缓存的 self._stats，token 扫描线程会独立刷新）
+        stats  = self._stats
         runs   = stats.get("runs", 0)
         secs   = stats.get("total_seconds", 0)
         tokens = stats.get("total_tokens", 0)
@@ -1583,6 +1587,10 @@ class AppDelegate(NSObject):
             parts.append(f"Claude {_format_tokens(tokens)} tokens")
         stats_text = "  ".join(parts)
         js += f"; showStats({json.dumps(stats_text)})"
+        # 内容无变化时跳过 JS eval，减少不必要的 WebView 通信
+        if js == self._last_widget_js:
+            return
+        self._last_widget_js = js
         self._wkview.evaluateJavaScript_completionHandler_(
             NSString.stringWithString_(js), None
         )
@@ -1608,6 +1616,11 @@ def main():
         while True:
             try:
                 _scan_today_tokens()
+                # 扫描完成后通知 AppDelegate 刷新 stats 缓存
+                delegate = _app_delegate_ref[0]
+                if delegate is not None:
+                    delegate._stats = _load_stats()
+                    delegate._last_widget_js = ""  # 使挂件下一帧强制刷新
             except Exception:
                 pass
             time.sleep(30)
